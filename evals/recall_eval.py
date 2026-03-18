@@ -337,15 +337,24 @@ def _make_iterative_recall(base_recall, query_embed: EmbedFn, search: SearchFn, 
 _RERANK_FETCH_FACTOR = 3  # fetch 15 when top_k=5
 
 
-def _make_reranked_recall(base_recall, rerank_fn, hydrate: HydrateFn):  # type: ignore[return]
-    """Wrap a recall fn with an LLM reranking pass over a wider candidate pool."""
+def _make_reranked_recall(  # type: ignore[return]
+    base_recall, rerank_fn, hydrate: HydrateFn, decayed_ids: frozenset[str]
+):
+    """Wrap a recall fn with an LLM reranking pass over a wider candidate pool.
+
+    Decayed (superseded) nodes are stripped before the LLM sees them so the
+    reranker cannot accidentally promote stale facts that vector decay suppressed.
+    """
     async def reranked_recall(query: MemoryQuery):  # type: ignore[return]
         wide_query = MemoryQuery(text=query.text, top_k=query.top_k * _RERANK_FETCH_FACTOR)
         r = await base_recall(wide_query)
         if r[0] == 'err' or not r[1].nodes:
             return r
+        candidates = [n for n in r[1].nodes if n.id not in decayed_ids]
+        if not candidates:
+            return r
         try:
-            ranked_ids = await rerank_fn(query.text, list(r[1].nodes))
+            ranked_ids = await rerank_fn(query.text, candidates)
         except Exception:
             return r
         hydrated = await hydrate(tuple(ranked_ids[:query.top_k]))
@@ -553,7 +562,7 @@ async def _build_index(  # type: ignore[return]
 
     if use_rerank:
         print("LLM reranker enabled — reasoning pass over wider candidate pool")
-        recall = _make_reranked_recall(recall, make_llama_rerank_fn(predict_url), hydrate)
+        recall = _make_reranked_recall(recall, make_llama_rerank_fn(predict_url), hydrate, decayed_ids)
 
     return recall
 
