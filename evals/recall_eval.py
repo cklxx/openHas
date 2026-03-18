@@ -30,10 +30,18 @@ import numpy as np
 from huggingface_hub import hf_hub_download
 from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
 from src.adapters.llama_expand import make_llama_expand_fn
+from src.adapters.llama_hyde import make_llama_hyde_fn
 from src.core.consolidation import consolidate
-from src.core.memory import make_recall
-from src.domain_types.memory import Edge, MemoryGraph, MemoryNode, MemoryQuery, QueryDistribution
-from src.domain_types.ports import SearchFn
+from src.core.memory import RecallError, make_recall
+from src.domain_types.memory import (
+    Edge,
+    MemoryGraph,
+    MemoryNode,
+    MemoryQuery,
+    QueryDistribution,
+    RecallResult,
+)
+from src.domain_types.ports import EmbedFn, ExpandContextFn, HydrateFn, SearchFn
 
 # ── Model registry ─────────────────────────────────────────────────────────
 
@@ -172,8 +180,10 @@ def _build_normed(embs: list[tuple[float, ...]]) -> "np.ndarray":  # type: ignor
 
 _DocIndex = tuple[list[str], "np.ndarray"]  # type: ignore[type-arg]
 
-# w_doc > w_exp: original asymmetric doc embedding has higher authority than expansions.
+# Blend weights: doc (query-emb ↔ doc-normed) > exp (context expansions) > hyde (hypothetical)
+# w_doc + w_exp must sum to 1.0 for the base search; _W_HYDE is applied as a post-blend.
 _W_DOC, _W_EXP = 0.70, 0.30
+_W_HYDE = 0.15   # HyDE contribution: final = base * (1 - _W_HYDE) + hyde * _W_HYDE
 _DECAY_FACTOR = 0.1
 
 
@@ -204,6 +214,119 @@ def _make_search_fn(
         return sorted(blended.items(), key=lambda x: x[1], reverse=True)[:top_k]
 
     return search
+
+
+# ── HyDE recall ──────────────────────────────────────────────────────────────
+#
+# HyDE (Hypothetical Document Embedding):
+#   query text ──▶ LLM ──▶ hypothetical memory snippets
+#                            ──▶ doc-side embed ──▶ cosine sim vs doc_normed
+#                                                    ──▶ hyde_scores
+#   final = base_score * (1 - W_HYDE) + hyde_score * W_HYDE
+#
+async def _compute_hyde_scores(
+    query_text: str,
+    hyde_fn: ExpandContextFn,
+    doc_embed: EmbedFn,
+    doc_ids: list[str],
+    doc_normed: "np.ndarray",  # type: ignore[type-arg]
+    decayed_ids: frozenset[str],
+) -> dict[str, float]:
+    """Compute per-node HyDE scores for a query. Returns {} on any failure."""
+    try:
+        snippets = await hyde_fn(query_text)
+    except Exception:
+        return {}
+    result: dict[str, float] = {}
+    for snippet in snippets:
+        try:
+            s_emb = await doc_embed(snippet)
+            q_vec = np.array(s_emb, dtype=np.float32)
+            q_vec /= np.linalg.norm(q_vec) + 1e-8
+            scores = doc_normed @ q_vec
+            for i, nid in enumerate(doc_ids):
+                score = float(scores[i])
+                if nid in decayed_ids:
+                    score *= _DECAY_FACTOR
+                if score > result.get(nid, -1.0):
+                    result[nid] = score
+        except Exception:
+            continue
+    return result
+
+
+def _make_hyde_recall(
+    base_search: SearchFn,
+    query_embed: EmbedFn,
+    doc_embed: EmbedFn,
+    hydrate: HydrateFn,
+    hyde_fn: ExpandContextFn,
+    doc_ids: list[str],
+    doc_normed: "np.ndarray",  # type: ignore[type-arg]
+    decayed_ids: frozenset[str],
+):  # type: ignore[return]
+    """Wrap base search with HyDE: blend base + hypothetical-snippet scores."""
+    async def recall(query: MemoryQuery):  # type: ignore[return]
+        if not query.text.strip():
+            return ('err', RecallError(code='EMPTY_QUERY'))
+        try:
+            q_emb = await query_embed(query.text)
+            base_hits = await base_search(q_emb, query.top_k)
+        except Exception as e:
+            return ('err', RecallError(code='SEARCH_FAILED', detail=str(e)))
+        base_map: dict[str, float] = dict(base_hits)
+        hyde_map = await _compute_hyde_scores(
+            query.text, hyde_fn, doc_embed, doc_ids, doc_normed, decayed_ids
+        )
+        all_nids = set(base_map) | set(hyde_map)
+        blended = {
+            nid: base_map.get(nid, 0.0) * (1.0 - _W_HYDE)
+                 + hyde_map.get(nid, 0.0) * _W_HYDE
+            for nid in all_nids
+        }
+        top_pairs = sorted(blended.items(), key=lambda x: x[1], reverse=True)[:query.top_k]
+        hydrated = await hydrate(tuple(nid for nid, _ in top_pairs))
+        pairs = [(hydrated[nid], blended[nid]) for nid, _ in top_pairs if nid in hydrated]
+        return ('ok', RecallResult(
+            nodes=tuple(n for n, _ in pairs),
+            scores=tuple(s for _, s in pairs),
+        ))
+    return recall
+
+
+# ── Multi-hop iterative recall ────────────────────────────────────────────────
+#
+# Round 1: search with original query embedding
+# Round 2: re-embed (query_text + top-3 node content), search again
+# Merge:   max score per node across both rounds
+#
+def _make_iterative_recall(base_recall, query_embed: EmbedFn, search: SearchFn, hydrate: HydrateFn):  # type: ignore[return]
+    """Wrap a recall fn with one additional search round using context from round-1 hits."""
+    async def iterative_recall(query: MemoryQuery):  # type: ignore[return]
+        r1 = await base_recall(query)
+        if r1[0] == 'err' or not r1[1].nodes:
+            return r1
+        ctx = ' '.join(n.content for n in r1[1].nodes[:3])
+        try:
+            r2_emb = await query_embed(f"{query.text} {ctx}")
+            r2_hits = await search(r2_emb, query.top_k)
+        except Exception:
+            return r1
+        r1_map: dict[str, float] = dict(zip((n.id for n in r1[1].nodes), r1[1].scores))
+        r2_map: dict[str, float] = dict(r2_hits)
+        merged = {
+            nid: max(r1_map.get(nid, 0.0), r2_map.get(nid, 0.0))
+            for nid in set(r1_map) | set(r2_map)
+        }
+        top_pairs = sorted(merged.items(), key=lambda x: x[1], reverse=True)[:query.top_k]
+        hydrated = await hydrate(tuple(nid for nid, _ in top_pairs))
+        pairs = [(hydrated[nid], merged[nid]) for nid, _ in top_pairs if nid in hydrated]
+        return ('ok', RecallResult(
+            nodes=tuple(n for n, _ in pairs),
+            scores=tuple(s for _, s in pairs),
+        ))
+    return iterative_recall
+
 
 # ── Metrics ─────────────────────────────────────────────────────────────────
 
@@ -325,6 +448,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Predict GGUF (auto-downloaded if omitted)")
     p.add_argument("--cases", metavar="PATH", default=str(_DEFAULT_CASES),
                    help="JSONL file with eval cases")
+    p.add_argument("--no-hyde", action="store_true",
+                   help="Disable HyDE query-time expansion (faster, lower recall)")
+    p.add_argument("--no-iterative", action="store_true",
+                   help="Disable multi-hop iterative retrieval (faster, lower recall)")
     return p.parse_args()
 
 
@@ -345,7 +472,9 @@ async def _embed_corpus(
     return doc_ids, doc_embs, exp_ids, exp_embs
 
 
-async def _build_index(embed_url: str, predict_url: str):  # type: ignore[return]
+async def _build_index(  # type: ignore[return]
+    embed_url: str, predict_url: str, use_hyde: bool, use_iterative: bool
+):
     doc_embed = make_doc_embed_fn(embed_url)
     query_embed = make_query_embed_fn(embed_url)
     expand = make_llama_expand_fn(predict_url)
@@ -360,8 +489,9 @@ async def _build_index(embed_url: str, predict_url: str):  # type: ignore[return
             if action.action in ('decay', 'supersede', 'remove')
             for nid in action.node_ids
         )
+    doc_normed = _build_normed(doc_embs)
     search = _make_search_fn(
-        (doc_ids, _build_normed(doc_embs)),
+        (doc_ids, doc_normed),
         (exp_ids, _build_normed(exp_embs)),
         decayed_ids,
     )
@@ -370,18 +500,34 @@ async def _build_index(embed_url: str, predict_url: str):  # type: ignore[return
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
         return {i: node_lookup[i] for i in ids if i in node_lookup}
 
-    return query_embed, search, hydrate
+    if use_hyde:
+        print("HyDE enabled — generating hypothetical snippets at query time")
+        recall = _make_hyde_recall(
+            search, query_embed, doc_embed, hydrate,
+            make_llama_hyde_fn(predict_url),
+            doc_ids, doc_normed, decayed_ids,
+        )
+    else:
+        recall = make_recall(search, query_embed, hydrate)  # type: ignore[arg-type]
+
+    if use_iterative:
+        print("Iterative retrieval enabled — two-round multi-hop search")
+        recall = _make_iterative_recall(recall, query_embed, search, hydrate)
+
+    return recall
 
 
-async def _run_eval(embed_url: str, predict_url: str, cases_path: str) -> None:
+async def _run_eval(
+    embed_url: str, predict_url: str, cases_path: str, use_hyde: bool, use_iterative: bool
+) -> None:
     cases = _load_cases(cases_path)
     non_adversarial = sum(1 for c in cases if not c.get("unanswerable"))
     ku_filter = sum(1 for c in cases if c.get("forbidden_ids"))
     print(f"Loaded {len(cases)} cases ({non_adversarial} scored, "
           f"{len(cases) - non_adversarial} adversarial, {ku_filter} ku_filter)")
     await asyncio.gather(_wait_ready(embed_url), _wait_ready(predict_url))
-    query_embed, search, hydrate = await _build_index(embed_url, predict_url)
-    rows = await _run_recall(make_recall(search, query_embed, hydrate), cases)  # type: ignore[arg-type]
+    recall = await _build_index(embed_url, predict_url, use_hyde, use_iterative)
+    rows = await _run_recall(recall, cases)
     _print_recall_report(rows)
 
 
@@ -395,7 +541,8 @@ async def main() -> None:
     embed_proc = _start_server(embed_path, _EMBED_PORT, ["--embedding", "--pooling", "last"])
     predict_proc = _start_server(predict_path, _PREDICT_PORT, [])
     try:
-        await _run_eval(embed_url, predict_url, args.cases)
+        await _run_eval(embed_url, predict_url, args.cases,
+                        use_hyde=not args.no_hyde, use_iterative=not args.no_iterative)
     finally:
         embed_proc.terminate()
         predict_proc.terminate()
