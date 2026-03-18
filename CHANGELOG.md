@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-03-18
+
+### Fixed
+
+- **`evals/recall_eval.py`** — expand-generated hypothetical queries now embedded with `query_embed` (query-side instruction prefix) instead of `doc_embed`; fixes cross-space comparison that was suppressing expansion recall lift.
+
 ## [0.1.1] - 2026-03-18
 
 ### Changed
