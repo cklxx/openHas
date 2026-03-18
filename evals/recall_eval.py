@@ -456,7 +456,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _embed_corpus(
-    doc_embed, expand  # type: ignore[type-arg]
+    doc_embed, query_embed, expand  # type: ignore[type-arg]
 ) -> tuple[list[str], list[tuple[float, ...]], list[str], list[tuple[float, ...]]]:
     doc_ids: list[str] = []
     doc_embs: list[tuple[float, ...]] = []
@@ -468,7 +468,7 @@ async def _embed_corpus(
         doc_embs.append(await doc_embed(text))
         for ctx in await expand(text):
             exp_ids.append(nid)
-            exp_embs.append(await doc_embed(ctx))
+            exp_embs.append(await query_embed(ctx))
     return doc_ids, doc_embs, exp_ids, exp_embs
 
 
@@ -478,7 +478,7 @@ async def _build_index(  # type: ignore[return]
     doc_embed = make_doc_embed_fn(embed_url)
     query_embed = make_query_embed_fn(embed_url)
     expand = make_llama_expand_fn(predict_url)
-    doc_ids, doc_embs, exp_ids, exp_embs = await _embed_corpus(doc_embed, expand)
+    doc_ids, doc_embs, exp_ids, exp_embs = await _embed_corpus(doc_embed, query_embed, expand)
     graph = _build_memory_graph()
     consolidation = consolidate(graph, time.time(), QueryDistribution())
     decayed_ids: frozenset[str] = frozenset()
