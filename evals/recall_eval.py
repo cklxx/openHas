@@ -31,6 +31,7 @@ from huggingface_hub import hf_hub_download
 from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
 from src.adapters.llama_expand import make_llama_expand_fn
 from src.adapters.llama_hyde import make_llama_hyde_fn
+from src.adapters.llama_rerank import make_llama_rerank_fn
 from src.core.consolidation import consolidate
 from src.core.memory import RecallError, make_recall
 from src.domain_types.memory import (
@@ -328,6 +329,35 @@ def _make_iterative_recall(base_recall, query_embed: EmbedFn, search: SearchFn, 
     return iterative_recall
 
 
+# ── LLM reranker ─────────────────────────────────────────────────────────────
+#
+# Fetches top-k * _RERANK_FETCH_FACTOR candidates, then asks the LLM to rank
+# them by true relevance — handles cue_trigger, referential, multi_hop.
+#
+_RERANK_FETCH_FACTOR = 3  # fetch 15 when top_k=5
+
+
+def _make_reranked_recall(base_recall, rerank_fn, hydrate: HydrateFn):  # type: ignore[return]
+    """Wrap a recall fn with an LLM reranking pass over a wider candidate pool."""
+    async def reranked_recall(query: MemoryQuery):  # type: ignore[return]
+        wide_query = MemoryQuery(text=query.text, top_k=query.top_k * _RERANK_FETCH_FACTOR)
+        r = await base_recall(wide_query)
+        if r[0] == 'err' or not r[1].nodes:
+            return r
+        try:
+            ranked_ids = await rerank_fn(query.text, list(r[1].nodes))
+        except Exception:
+            return r
+        hydrated = await hydrate(tuple(ranked_ids[:query.top_k]))
+        top_ids = [nid for nid in ranked_ids[:query.top_k] if nid in hydrated]
+        score_map = dict(zip((n.id for n in r[1].nodes), r[1].scores))
+        return ('ok', RecallResult(
+            nodes=tuple(hydrated[nid] for nid in top_ids),
+            scores=tuple(score_map.get(nid, 0.0) for nid in top_ids),
+        ))
+    return reranked_recall
+
+
 # ── Metrics ─────────────────────────────────────────────────────────────────
 
 def _recall_at(returned: list[str], expected: set[str], k: int) -> float:
@@ -452,6 +482,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Disable HyDE query-time expansion (faster, lower recall)")
     p.add_argument("--no-iterative", action="store_true",
                    help="Disable multi-hop iterative retrieval (faster, lower recall)")
+    p.add_argument("--no-rerank", action="store_true",
+                   help="Disable LLM reranker (faster, lower recall on cue/referential/multi-hop)")
     return p.parse_args()
 
 
@@ -473,7 +505,7 @@ async def _embed_corpus(
 
 
 async def _build_index(  # type: ignore[return]
-    embed_url: str, predict_url: str, use_hyde: bool, use_iterative: bool
+    embed_url: str, predict_url: str, use_hyde: bool, use_iterative: bool, use_rerank: bool
 ):
     doc_embed = make_doc_embed_fn(embed_url)
     query_embed = make_query_embed_fn(embed_url)
@@ -514,11 +546,16 @@ async def _build_index(  # type: ignore[return]
         print("Iterative retrieval enabled — two-round multi-hop search")
         recall = _make_iterative_recall(recall, query_embed, search, hydrate)
 
+    if use_rerank:
+        print("LLM reranker enabled — reasoning pass over wider candidate pool")
+        recall = _make_reranked_recall(recall, make_llama_rerank_fn(predict_url), hydrate)
+
     return recall
 
 
 async def _run_eval(
-    embed_url: str, predict_url: str, cases_path: str, use_hyde: bool, use_iterative: bool
+    embed_url: str, predict_url: str, cases_path: str,
+    use_hyde: bool, use_iterative: bool, use_rerank: bool
 ) -> None:
     cases = _load_cases(cases_path)
     non_adversarial = sum(1 for c in cases if not c.get("unanswerable"))
@@ -526,7 +563,7 @@ async def _run_eval(
     print(f"Loaded {len(cases)} cases ({non_adversarial} scored, "
           f"{len(cases) - non_adversarial} adversarial, {ku_filter} ku_filter)")
     await asyncio.gather(_wait_ready(embed_url), _wait_ready(predict_url))
-    recall = await _build_index(embed_url, predict_url, use_hyde, use_iterative)
+    recall = await _build_index(embed_url, predict_url, use_hyde, use_iterative, use_rerank)
     rows = await _run_recall(recall, cases)
     _print_recall_report(rows)
 
@@ -542,7 +579,8 @@ async def main() -> None:
     predict_proc = _start_server(predict_path, _PREDICT_PORT, [])
     try:
         await _run_eval(embed_url, predict_url, args.cases,
-                        use_hyde=not args.no_hyde, use_iterative=not args.no_iterative)
+                        use_hyde=not args.no_hyde, use_iterative=not args.no_iterative,
+                        use_rerank=not args.no_rerank)
     finally:
         embed_proc.terminate()
         predict_proc.terminate()
