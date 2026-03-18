@@ -1,5 +1,6 @@
 """Property-based tests for predictive value scoring (P0.2)."""
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from src.core.scoring import compute_predictive_value
@@ -63,3 +64,41 @@ def test_kind_prior_affects_score() -> None:
     v_fact = compute_predictive_value(node, 2.0, fact_heavy)
     v_ep = compute_predictive_value(node, 2.0, episode_heavy)
     assert v_fact > v_ep
+
+
+def test_transient_decays_monotonically_with_age() -> None:
+    node = _make_node('transient', access_count=5)
+    ages = [0.0, 1_000.0, 10_000.0, 100_000.0]
+    scores = [compute_predictive_value(node, node.record_time + a, _DIST) for a in ages]
+    assert all(scores[i] >= scores[i + 1] for i in range(len(scores) - 1))
+
+
+def test_permanent_does_not_decay_with_age() -> None:
+    node = _make_node('permanent', access_count=5)
+    v_young = compute_predictive_value(node, node.record_time + 1.0, _DIST)
+    v_old = compute_predictive_value(node, node.record_time + 1_000_000.0, _DIST)
+    assert v_young == v_old
+
+
+def test_access_count_zero_uses_neutral_prior() -> None:
+    # access_count=0 → access_utility=0.5; access_count=10 → 1.0
+    node_zero = _make_node(access_count=0)
+    node_used = _make_node(access_count=10)
+    v_zero = compute_predictive_value(node_zero, 2.0, _DIST)
+    v_used = compute_predictive_value(node_used, 2.0, _DIST)
+    assert v_used == pytest.approx(v_zero * 2.0)
+
+
+def test_access_count_caps_at_ten() -> None:
+    node_10 = _make_node(access_count=10)
+    node_100 = _make_node(access_count=100)
+    assert compute_predictive_value(node_10, 2.0, _DIST) == \
+        compute_predictive_value(node_100, 2.0, _DIST)
+
+
+@given(st.integers(min_value=0, max_value=1000))
+def test_uniqueness_strictly_decreases_with_dependency_count(dep: int) -> None:
+    node = _make_node(access_count=1)
+    v0 = compute_predictive_value(node, 2.0, _DIST, dependency_count=0)
+    vn = compute_predictive_value(node, 2.0, _DIST, dependency_count=dep)
+    assert v0 >= vn
