@@ -1,4 +1,4 @@
-from typing import Protocol
+from typing import Literal, Protocol
 
 
 class QueryFn(Protocol):
@@ -25,3 +25,16 @@ class SearchFn(Protocol):
 
 class NowFn(Protocol):
     def __call__(self) -> float: ...
+
+
+class ClassifyFn(Protocol):
+    """Classify content permanence: permanent, transient, or unknown."""
+    async def __call__(self, content: str) -> Literal['permanent', 'transient', 'unknown']: ...
+
+
+class PredictQueryFn(Protocol):
+    """Predict what kinds of queries the user will ask next.
+
+    Returns list of (predicted_query_text, probability) pairs.
+    """
+    async def __call__(self, recent_context: str) -> list[tuple[str, float]]: ...

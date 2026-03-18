@@ -35,7 +35,8 @@ def make_store_memory(embed: EmbedFn, now: NowFn):
             id=id,
             kind=kind,  # type: ignore[arg-type]
             content=content,
-            created_at=ts,
+            event_time=ts,
+            record_time=ts,
             last_accessed=ts,
             labels=labels,
             embedding=embedding,
@@ -59,7 +60,8 @@ def make_recall(search: SearchFn, embed: EmbedFn):
                 id=hit_id,
                 kind='fact',
                 content='',
-                created_at=0.0,
+                event_time=0.0,
+                record_time=0.0,
                 last_accessed=0.0,
             )
             for hit_id, _score in hits
