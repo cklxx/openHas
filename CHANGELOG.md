@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-03-18
+
+### Added
+
+- **`src/adapters/llama_rerank.py`** — LLM reranker: fetches 3× candidates, asks LLM to rank by true relevance; handles cue_trigger, referential, and multi_hop categories that vector search cannot.
+- **`evals/recall_eval.py`** — wire reranker as final recall stage; add `--no-rerank` flag.
+
 ## [0.1.2] - 2026-03-18
 
 ### Fixed
