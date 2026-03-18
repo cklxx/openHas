@@ -56,7 +56,6 @@ class MemoryQuery:
 @dataclass(frozen=True, slots=True)
 class RecallResult:
     nodes: tuple[MemoryNode, ...]
-    edges: tuple[Edge, ...] = ()
     scores: tuple[float, ...] = ()
 
 
@@ -75,12 +74,28 @@ class QueryDistribution:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeWriteError:
+    """Storage-layer write failure."""
+    code: Literal['WRITE_FAILED', 'DUPLICATE_ID']
+    detail: str = ''
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorError:
+    """Consolidation executor failure."""
+    code: Literal['WRITE_FAILED', 'UNKNOWN_NODE']
+    detail: str = ''
+
+
+@dataclass(frozen=True, slots=True)
 class WriteDecision:
     """Output of the ingestion gate — store, skip, or merge."""
     action: Literal['store', 'skip', 'merge']
     estimated_value: float
     merge_target_id: str = ''
     reason: str = ''
+    # Prepared node (embedding already computed); present when action != 'skip'.
+    node: 'MemoryNode | None' = None
 
 
 @dataclass(frozen=True, slots=True)
