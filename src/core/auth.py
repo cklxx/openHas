@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+from typing import cast
 
 from src.domain_types.auth import AuthError, Claims
 from src.domain_types.result import Result
@@ -18,7 +19,7 @@ def _decode_payload(token: str) -> dict[str, object] | None:
     try:
         payload_b64 = parts[1] + '=' * (-len(parts[1]) % 4)
         raw = base64.urlsafe_b64decode(payload_b64)
-        return json.loads(raw)  # type: ignore[no-any-return]
+        return cast(dict[str, object], json.loads(raw))
     except (ValueError, json.JSONDecodeError):
         return None
 
@@ -51,9 +52,11 @@ def _extract_claims(
     if not isinstance(sub, str):
         return ('err', AuthError(code='MALFORMED', detail='missing sub'))
     raw_roles = payload.get('roles', ())
-    if not isinstance(raw_roles, list):
+    if not isinstance(raw_roles, list) or not all(
+        isinstance(r, str) for r in cast(list[object], raw_roles)
+    ):
         return ('err', AuthError(code='MALFORMED', detail='bad roles'))
-    return ('ok', Claims(sub=sub, exp=exp, roles=tuple(raw_roles)))
+    return ('ok', Claims(sub=sub, exp=exp, roles=tuple(cast(list[str], raw_roles))))
 
 
 def authenticate(token: str, secret: str, now: float) -> Result[Claims, AuthError]:

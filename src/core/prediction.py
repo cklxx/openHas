@@ -9,6 +9,7 @@ predicted queries. Two-phase retrieval:
   2. Predictive buffer — retrieval for predicted future queries (proactive)
 """
 
+import asyncio
 from dataclasses import dataclass
 from typing import Literal
 
@@ -82,18 +83,15 @@ async def _collect_hits(
     predictions: list[tuple[str, float]],
     embed: EmbedFn, search: SearchFn,
 ) -> Result[PredictiveBuffer, BufferError]:
-    all_nodes: list[MemoryNode] = []
-    all_scores: list[float] = []
-    queries: list[str] = []
-    for q_text, prob in predictions:
-        try:
-            nodes, scores = await _search_one(q_text, prob, embed, search)
-        except Exception as exc:
-            return ('err', BufferError(code='SEARCH_FAILED', detail=str(exc)))
-        all_nodes.extend(nodes)
-        all_scores.extend(scores)
-        queries.append(q_text)
+    try:
+        results = await asyncio.gather(*[
+            _search_one(q_text, prob, embed, search)
+            for q_text, prob in predictions
+        ])
+    except Exception as exc:
+        return ('err', BufferError(code='SEARCH_FAILED', detail=str(exc)))
     return ('ok', PredictiveBuffer(
-        nodes=tuple(all_nodes), scores=tuple(all_scores),
-        predicted_queries=tuple(queries),
+        nodes=tuple(n for nodes, _ in results for n in nodes),
+        scores=tuple(s for _, scores in results for s in scores),
+        predicted_queries=tuple(q for q, _ in predictions),
     ))

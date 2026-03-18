@@ -15,7 +15,6 @@ degrades the next response. This depends on:
 from src.domain_types.memory import MemoryNode, QueryDistribution
 
 _PERMANENCE_WEIGHTS = {'permanent': 1.0, 'transient': 0.3, 'unknown': 0.6}
-_KIND_FIELDS = ('fact', 'episode', 'preference', 'entity', 'procedure')
 
 
 def _permanence_factor(node: MemoryNode, age: float) -> float:

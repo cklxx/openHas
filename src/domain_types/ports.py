@@ -38,3 +38,12 @@ class PredictQueryFn(Protocol):
     Returns list of (predicted_query_text, probability) pairs.
     """
     async def __call__(self, recent_context: str) -> list[tuple[str, float]]: ...
+
+
+class ExpandContextFn(Protocol):
+    """Generate hypothetical queries that would retrieve a given memory.
+
+    Used at index-build time: each generated query is embedded (query-side)
+    and added to the search index alongside the raw doc embedding.
+    """
+    async def __call__(self, memory_text: str) -> list[str]: ...
