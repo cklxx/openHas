@@ -30,9 +30,10 @@ import numpy as np
 from huggingface_hub import hf_hub_download
 from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
 from src.adapters.llama_expand import make_llama_expand_fn
-from src.adapters.llama_predict import make_llama_predict_fn
+from src.core.consolidation import consolidate
 from src.core.memory import make_recall
-from src.domain_types.memory import MemoryQuery
+from src.domain_types.memory import Edge, MemoryGraph, MemoryNode, MemoryQuery, QueryDistribution
+from src.domain_types.ports import SearchFn
 
 # ── Model registry ─────────────────────────────────────────────────────────
 
@@ -100,6 +101,35 @@ _CORPUS: list[tuple[str, str]] = [
      "User enforces work-life balance, does not check work messages after 9pm"),
 ]
 
+_CORPUS_PERMANENCE: dict[str, str] = {
+    "sched-sync":     "transient",   # superseded
+    "sched-sync-new": "permanent",
+    "work-role-old":  "transient",   # superseded
+    "work-role-new":  "permanent",
+}
+
+_CORPUS_EDGES: list[tuple[str, str]] = [
+    ("sched-sync-new", "sched-sync"),
+    ("work-role-new",  "work-role-old"),
+]
+
+
+def _build_memory_graph() -> MemoryGraph:
+    nodes = tuple(
+        MemoryNode(
+            id=nid, kind='fact', content=text,
+            event_time=float(i), record_time=float(i), last_accessed=float(i),
+            permanence=_CORPUS_PERMANENCE.get(nid, 'unknown'),  # type: ignore[arg-type]
+        )
+        for i, (nid, text) in enumerate(_CORPUS, start=1)
+    )
+    edges = tuple(
+        Edge(source_id=src, target_id=tgt, kind='supersedes')
+        for src, tgt in _CORPUS_EDGES
+    )
+    return MemoryGraph(nodes=nodes, edges=edges)
+
+
 # ── Case loading ────────────────────────────────────────────────────────────
 
 def _load_cases(path: str) -> list[dict]:  # type: ignore[type-arg]
@@ -144,14 +174,17 @@ _DocIndex = tuple[list[str], "np.ndarray"]  # type: ignore[type-arg]
 
 # w_doc > w_exp: original asymmetric doc embedding has higher authority than expansions.
 _W_DOC, _W_EXP = 0.70, 0.30
+_DECAY_FACTOR = 0.1
 
 
-def _make_search_fn(doc_index: _DocIndex, exp_index: _DocIndex):  # type: ignore[type-arg]
+def _make_search_fn(
+    doc_index: _DocIndex, exp_index: _DocIndex, decayed_ids: frozenset[str]
+) -> SearchFn:
     doc_ids, doc_normed = doc_index
     exp_ids, exp_normed = exp_index
 
-    async def search(q_emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
-        q = np.array(q_emb, dtype=np.float32)
+    async def search(embedding: tuple[float, ...], top_k: int) -> list[tuple[str, float]]:
+        q = np.array(embedding, dtype=np.float32)
         q /= np.linalg.norm(q) + 1e-8
         doc_scores = {doc_ids[i]: float(s) for i, s in enumerate(doc_normed @ q)}
         exp_raw = exp_normed @ q
@@ -160,11 +193,15 @@ def _make_search_fn(doc_index: _DocIndex, exp_index: _DocIndex):  # type: ignore
             s = float(exp_raw[int(i)])
             if s > exp_best.get(nid, -1.0):
                 exp_best[nid] = s
-        blended = {
+        raw = {
             nid: doc_scores.get(nid, 0.0) * _W_DOC + exp_best.get(nid, 0.0) * _W_EXP
             for nid in set(doc_scores) | set(exp_best)
         }
-        return sorted(blended.items(), key=lambda x: x[1], reverse=True)[:k]
+        blended = {
+            nid: (score * _DECAY_FACTOR if nid in decayed_ids else score)
+            for nid, score in raw.items()
+        }
+        return sorted(blended.items(), key=lambda x: x[1], reverse=True)[:top_k]
 
     return search
 
@@ -179,6 +216,11 @@ def _mrr(returned: list[str], expected: set[str]) -> float:
         if nid in expected:
             return 1.0 / rank
     return 0.0
+
+
+def _anti_recall_at(returned: list[str], forbidden: set[str], k: int) -> float:
+    """1.0 when no forbidden ID appears in top-k; 0.0 when any forbidden ID does."""
+    return 0.0 if set(returned[:k]) & forbidden else 1.0
 
 # ── Eval loops ──────────────────────────────────────────────────────────────
 
@@ -198,19 +240,10 @@ async def _run_recall(
             "category": case["category"],
             "expected": set(case["expected_ids"]),
             "returned": [n.id for n in result[1].nodes],
+            "forbidden": set(case.get("forbidden_ids", [])),
         })
     return rows
 
-
-async def _run_prediction(predict_fn, contexts: list[str]) -> None:
-    sep = "─" * 62
-    print(f"\n── Prediction samples {'─' * 40}")
-    for ctx in contexts:
-        preds = await predict_fn(ctx)
-        print(f"\n  ctx  {ctx!r}")
-        for q, p in preds:
-            print(f"  [{p:.1f}] {q}")
-    print(sep)
 
 # ── Report ───────────────────────────────────────────────────────────────────
 
@@ -224,7 +257,7 @@ def _pad(s: str, width: int) -> str:
 
 
 def _print_row(
-    query_text: str, expected: set[str], returned: list[str]
+    query_text: str, expected: set[str], returned: list[str], forbidden: set[str]
 ) -> tuple[float, ...]:
     r1, r3, r5 = (_recall_at(returned, expected, k) for k in (1, 3, 5))
     rr = _mrr(returned, expected)
@@ -233,35 +266,53 @@ def _print_row(
     if not r1:
         first_hit = next((r for r in returned if r in expected), "—")
         print(f"      got: {returned[:3]}  first hit: {first_hit}")
-    return r1, r3, r5, rr
+    ar5 = _anti_recall_at(returned, forbidden, 5) if forbidden else -1.0
+    if forbidden and not ar5:
+        print(f"      anti-R@5 FAIL  forbidden appeared: {sorted(set(returned[:5]) & forbidden)}")
+    return r1, r3, r5, rr, ar5
 
 
 def _print_category_report(rows: list[dict]) -> None:  # type: ignore[type-arg]
-    cats: dict[str, list[tuple[float, float]]] = {}
+    cats: dict[str, list[tuple[float, float, float]]] = {}
     for row in rows:
         r1 = _recall_at(row["returned"], row["expected"], 1)
         rr = _mrr(row["returned"], row["expected"])
-        cats.setdefault(row["category"], []).append((r1, rr))
+        ar5 = _anti_recall_at(row["returned"], row["forbidden"], 5) if row["forbidden"] else -1.0
+        cats.setdefault(row["category"], []).append((r1, rr, ar5))
     print("\n── By category " + "─" * 47)
     for cat, metrics in sorted(cats.items()):
         n = len(metrics)
         mr1 = sum(m[0] for m in metrics) / n
         mrr = sum(m[1] for m in metrics) / n
-        print(f"  {cat:<18}  R@1={mr1:.2f}  MRR={mrr:.3f}  ({n} cases)")
+        ar_vals = [m[2] for m in metrics if m[2] >= 0.0]
+        ar5_str = f"  AR@5={sum(ar_vals) / len(ar_vals):.2f}" if ar_vals else ""
+        print(f"  {cat:<18}  R@1={mr1:.2f}  MRR={mrr:.3f}{ar5_str}  ({n} cases)")
     print()
+
+
+def _accumulate_row(row: dict, totals: list[float]) -> int:  # type: ignore[type-arg]
+    """Print one row and accumulate its metrics; returns 1 if AR@5 was tracked."""
+    r1, r3, r5, rr, ar5 = _print_row(
+        row["query"], row["expected"], row["returned"], row["forbidden"]
+    )
+    for i, v in enumerate((r1, r3, r5, rr)):
+        totals[i] += v
+    if ar5 >= 0.0:
+        totals[4] += ar5
+        return 1
+    return 0
 
 
 def _print_recall_report(rows: list[dict]) -> None:  # type: ignore[type-arg]
     header = f"  {'Query':<50} R@1  R@3  R@5    MRR"
     sep = "─" * len(header)
     print(f"\n{header}\n{sep}")
-    totals = [0.0] * 4
-    for row in rows:
-        for i, v in enumerate(_print_row(row["query"], row["expected"], row["returned"])):
-            totals[i] += v
+    totals = [0.0] * 5
+    n_ar = sum(_accumulate_row(row, totals) for row in rows)
     n = len(rows)
-    t1, t3, t5, tmrr = (v / n for v in totals)
-    print(f"{sep}\n  {'MEAN':<50}  {t1:.2f}  {t3:.2f}  {t5:.2f}  {tmrr:.3f}")
+    t1, t3, t5, tmrr = (totals[i] / n for i in range(4))
+    ar5_str = f"  AR@5={totals[4] / n_ar:.2f}" if n_ar else ""
+    print(f"{sep}\n  {'MEAN':<50}  {t1:.2f}  {t3:.2f}  {t5:.2f}  {tmrr:.3f}{ar5_str}")
     _print_category_report(rows)
 
 # ── Entry point ─────────────────────────────────────────────────────────────
@@ -274,15 +325,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Predict GGUF (auto-downloaded if omitted)")
     p.add_argument("--cases", metavar="PATH", default=str(_DEFAULT_CASES),
                    help="JSONL file with eval cases")
-    p.add_argument("--no-predict", action="store_true",
-                   help="Skip prediction eval")
     return p.parse_args()
 
 
-async def _build_index(embed_url: str, predict_url: str):  # type: ignore[return]
-    doc_embed = make_doc_embed_fn(embed_url)
-    query_embed = make_query_embed_fn(embed_url)
-    expand = make_llama_expand_fn(predict_url)
+async def _embed_corpus(
+    doc_embed, expand  # type: ignore[type-arg]
+) -> tuple[list[str], list[tuple[float, ...]], list[str], list[tuple[float, ...]]]:
     doc_ids: list[str] = []
     doc_embs: list[tuple[float, ...]] = []
     exp_ids: list[str] = []
@@ -294,27 +342,42 @@ async def _build_index(embed_url: str, predict_url: str):  # type: ignore[return
         for ctx in await expand(text):
             exp_ids.append(nid)
             exp_embs.append(await doc_embed(ctx))
+    return doc_ids, doc_embs, exp_ids, exp_embs
+
+
+async def _build_index(embed_url: str, predict_url: str):  # type: ignore[return]
+    doc_embed = make_doc_embed_fn(embed_url)
+    query_embed = make_query_embed_fn(embed_url)
+    expand = make_llama_expand_fn(predict_url)
+    doc_ids, doc_embs, exp_ids, exp_embs = await _embed_corpus(doc_embed, expand)
+    graph = _build_memory_graph()
+    consolidation = consolidate(graph, time.time(), QueryDistribution())
+    decayed_ids: frozenset[str] = frozenset()
+    if consolidation[0] == 'ok':
+        decayed_ids = frozenset(
+            nid
+            for action in consolidation[1].actions
+            if action.action in ('decay', 'supersede', 'remove')
+            for nid in action.node_ids
+        )
     search = _make_search_fn(
         (doc_ids, _build_normed(doc_embs)),
         (exp_ids, _build_normed(exp_embs)),
+        decayed_ids,
     )
     return query_embed, search
 
 
-async def _run_eval(
-    embed_url: str, predict_url: str, cases_path: str, no_predict: bool
-) -> None:
+async def _run_eval(embed_url: str, predict_url: str, cases_path: str) -> None:
     cases = _load_cases(cases_path)
     non_adversarial = sum(1 for c in cases if not c.get("unanswerable"))
+    ku_filter = sum(1 for c in cases if c.get("forbidden_ids"))
     print(f"Loaded {len(cases)} cases ({non_adversarial} scored, "
-          f"{len(cases) - non_adversarial} adversarial)")
+          f"{len(cases) - non_adversarial} adversarial, {ku_filter} ku_filter)")
     await asyncio.gather(_wait_ready(embed_url), _wait_ready(predict_url))
     query_embed, search = await _build_index(embed_url, predict_url)
     rows = await _run_recall(make_recall(search, query_embed), cases)  # type: ignore[arg-type]
     _print_recall_report(rows)
-    if not no_predict:
-        predict = make_llama_predict_fn(predict_url)
-        await _run_prediction(predict, ["User asked about lunch options"])
 
 
 async def main() -> None:
@@ -327,7 +390,7 @@ async def main() -> None:
     embed_proc = _start_server(embed_path, _EMBED_PORT, ["--embedding", "--pooling", "last"])
     predict_proc = _start_server(predict_path, _PREDICT_PORT, [])
     try:
-        await _run_eval(embed_url, predict_url, args.cases, args.no_predict)
+        await _run_eval(embed_url, predict_url, args.cases)
     finally:
         embed_proc.terminate()
         predict_proc.terminate()
