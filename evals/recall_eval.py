@@ -384,7 +384,9 @@ async def _run_recall(
     for case in cases:
         if case.get("unanswerable"):
             continue
+        t0 = time.monotonic()
         result = await recall_fn(MemoryQuery(text=case["query"], top_k=5))
+        elapsed = time.monotonic() - t0
         if result[0] == "err":
             print(f"  ERR {case['query']!r}: {result[1]}", file=sys.stderr)
             continue
@@ -394,6 +396,7 @@ async def _run_recall(
             "expected": set(case["expected_ids"]),
             "returned": [n.id for n in result[1].nodes],
             "forbidden": set(case.get("forbidden_ids", [])),
+            "elapsed": elapsed,
         })
     return rows
 
@@ -410,12 +413,13 @@ def _pad(s: str, width: int) -> str:
 
 
 def _print_row(
-    query_text: str, expected: set[str], returned: list[str], forbidden: set[str]
+    query_text: str, expected: set[str], returned: list[str], forbidden: set[str],
+    elapsed: float,
 ) -> tuple[float, ...]:
     r1, r3, r5 = (_recall_at(returned, expected, k) for k in (1, 3, 5))
     rr = _mrr(returned, expected)
     mark = "✓" if r1 else "✗"
-    print(f"  {mark} {_pad(query_text, 48)}  {r1:.0f}    {r3:.0f}    {r5:.0f}  {rr:.3f}")
+    print(f"  {mark} {_pad(query_text, 48)}  {r1:.0f}    {r3:.0f}    {r5:.0f}  {rr:.3f}  {elapsed:.1f}s")
     if not r1:
         first_hit = next((r for r in returned if r in expected), "—")
         print(f"      got: {returned[:3]}  first hit: {first_hit}")
@@ -446,7 +450,7 @@ def _print_category_report(rows: list[dict]) -> None:  # type: ignore[type-arg]
 def _accumulate_row(row: dict, totals: list[float]) -> int:  # type: ignore[type-arg]
     """Print one row and accumulate its metrics; returns 1 if AR@5 was tracked."""
     r1, r3, r5, rr, ar5 = _print_row(
-        row["query"], row["expected"], row["returned"], row["forbidden"]
+        row["query"], row["expected"], row["returned"], row["forbidden"], row["elapsed"]
     )
     for i, v in enumerate((r1, r3, r5, rr)):
         totals[i] += v
@@ -457,7 +461,7 @@ def _accumulate_row(row: dict, totals: list[float]) -> int:  # type: ignore[type
 
 
 def _print_recall_report(rows: list[dict]) -> None:  # type: ignore[type-arg]
-    header = f"  {'Query':<50} R@1  R@3  R@5    MRR"
+    header = f"  {'Query':<50} R@1  R@3  R@5    MRR    time"
     sep = "─" * len(header)
     print(f"\n{header}\n{sep}")
     totals = [0.0] * 5
@@ -465,7 +469,8 @@ def _print_recall_report(rows: list[dict]) -> None:  # type: ignore[type-arg]
     n = len(rows)
     t1, t3, t5, tmrr = (totals[i] / n for i in range(4))
     ar5_str = f"  AR@5={totals[4] / n_ar:.2f}" if n_ar else ""
-    print(f"{sep}\n  {'MEAN':<50}  {t1:.2f}  {t3:.2f}  {t5:.2f}  {tmrr:.3f}{ar5_str}")
+    avg_time = sum(r["elapsed"] for r in rows) / n
+    print(f"{sep}\n  {'MEAN':<50}  {t1:.2f}  {t3:.2f}  {t5:.2f}  {tmrr:.3f}{ar5_str}  {avg_time:.1f}s")
     _print_category_report(rows)
 
 # ── Entry point ─────────────────────────────────────────────────────────────
