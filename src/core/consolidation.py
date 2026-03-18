@@ -35,18 +35,11 @@ class ConsolidationResult:
     actions: tuple[ConsolidationAction, ...]
 
 
-def _node_by_id(graph: MemoryGraph, nid: str) -> MemoryNode | None:
-    for n in graph.nodes:
-        if n.id == nid:
-            return n
-    return None
-
-
 def _resolve_contradiction(
-    graph: MemoryGraph, src_id: str, tgt_id: str
+    index: dict[str, MemoryNode], src_id: str, tgt_id: str
 ) -> ConsolidationAction | None:
-    src = _node_by_id(graph, src_id)
-    tgt = _node_by_id(graph, tgt_id)
+    src = index.get(src_id)
+    tgt = index.get(tgt_id)
     if src is None or tgt is None:
         return None
     older = src if src.record_time <= tgt.record_time else tgt
@@ -58,10 +51,11 @@ def _resolve_contradiction(
 
 
 def _find_contradictions(graph: MemoryGraph) -> tuple[ConsolidationAction, ...]:
+    index = {n.id: n for n in graph.nodes}
     actions = [
-        a for edge in graph.edges if edge.kind == 'contradicts'
-        for a in [_resolve_contradiction(graph, edge.source_id, edge.target_id)]
-        if a is not None
+        a for edge in graph.edges
+        if edge.kind == 'contradicts'
+        if (a := _resolve_contradiction(index, edge.source_id, edge.target_id)) is not None
     ]
     return tuple(actions)
 

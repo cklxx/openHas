@@ -117,7 +117,7 @@ def make_ingestion_gate(classify: ClassifyFn, embed: EmbedFn, now: NowFn):
             return ('err', IngestError(code='EMPTY_CONTENT'))
         prep = await _classify_and_embed(content, classify, embed, now)
         if prep[0] == 'err':
-            return prep  # type: ignore[return-value]
+            return ('err', prep[1])
         node = _to_provisional_node(content, kind, prep[1])
         return ('ok', _decide(node, now(), graph, dist))
 
