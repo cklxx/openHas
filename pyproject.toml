@@ -11,7 +11,10 @@ version = "0.1.1"
 description = "Memory system with graph representation and predictive recall"
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = []
+dependencies = [
+    "httpx>=0.27",
+    "sqlite-vec>=0.1.1",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -60,3 +63,4 @@ include = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["integration: requires llama-server and sqlite-vec installed"]

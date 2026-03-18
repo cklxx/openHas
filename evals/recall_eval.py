@@ -365,7 +365,12 @@ async def _build_index(embed_url: str, predict_url: str):  # type: ignore[return
         (exp_ids, _build_normed(exp_embs)),
         decayed_ids,
     )
-    return query_embed, search
+    node_lookup = {n.id: n for n in graph.nodes}
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: node_lookup[i] for i in ids if i in node_lookup}
+
+    return query_embed, search, hydrate
 
 
 async def _run_eval(embed_url: str, predict_url: str, cases_path: str) -> None:
@@ -375,8 +380,8 @@ async def _run_eval(embed_url: str, predict_url: str, cases_path: str) -> None:
     print(f"Loaded {len(cases)} cases ({non_adversarial} scored, "
           f"{len(cases) - non_adversarial} adversarial, {ku_filter} ku_filter)")
     await asyncio.gather(_wait_ready(embed_url), _wait_ready(predict_url))
-    query_embed, search = await _build_index(embed_url, predict_url)
-    rows = await _run_recall(make_recall(search, query_embed), cases)  # type: ignore[arg-type]
+    query_embed, search, hydrate = await _build_index(embed_url, predict_url)
+    rows = await _run_recall(make_recall(search, query_embed, hydrate), cases)  # type: ignore[arg-type]
     _print_recall_report(rows)
 
 

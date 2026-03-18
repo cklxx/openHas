@@ -1,16 +1,29 @@
-"""Memory system CLI — entrypoint that wires adapters into core."""
+"""Memory system CLI — wires real adapters into core."""
 
 import argparse
 import asyncio
 import time
 
-from src.adapters.embeddings import make_embed_fn
+from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
+from src.adapters.sqlite_vec_store import (
+    make_hydrate_fn,
+    make_search_fn,
+    make_store_fn,
+    open_db,
+)
 from src.core.memory import make_recall, make_store_memory
 from src.domain_types.memory import MemoryQuery
+
+_DEFAULT_DB = "memory.db"
+_DEFAULT_EMBED_URL = "http://localhost:18080"
+_DEFAULT_USER = "default"
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='openhas', description='Memory system CLI')
+    parser.add_argument('--db', default=_DEFAULT_DB, help='SQLite database path')
+    parser.add_argument('--embed-url', default=_DEFAULT_EMBED_URL, help='llama-server embed URL')
+    parser.add_argument('--user', default=_DEFAULT_USER, help='User ID for memory isolation')
     sub = parser.add_subparsers(dest='command')
 
     store_p = sub.add_parser('store', help='Store a memory node')
@@ -27,8 +40,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _handle_store(args: argparse.Namespace) -> None:
-    embed = make_embed_fn()
-    store = make_store_memory(embed, time.time)
+    conn = open_db(args.db)
+    embed = make_doc_embed_fn(args.embed_url)
+    store_node = make_store_fn(conn, args.user)
+    store = make_store_memory(embed, time.time, store_node)
     result = await store(
         id=args.id,
         kind=args.kind,
@@ -42,19 +57,17 @@ async def _handle_store(args: argparse.Namespace) -> None:
 
 
 async def _handle_recall(args: argparse.Namespace) -> None:
-    embed = make_embed_fn()
-    search_hits: list[tuple[str, float]] = []
-
-    async def stub_search(
-        embedding: tuple[float, ...], top_k: int
-    ) -> list[tuple[str, float]]:
-        return search_hits[:top_k]
-
-    recall = make_recall(stub_search, embed)  # type: ignore[arg-type]
+    conn = open_db(args.db)
+    query_embed = make_query_embed_fn(args.embed_url)
+    search = make_search_fn(conn, args.user)
+    hydrate = make_hydrate_fn(conn, args.user)
+    recall = make_recall(search, query_embed, hydrate)
     query = MemoryQuery(text=args.query, top_k=args.top_k)
     result = await recall(query)
     if result[0] == 'ok':
-        print(f"Recalled {len(result[1].nodes)} nodes")
+        for node in result[1].nodes:
+            print(f"[{node.kind}] {node.id}: {node.content}")
+        print(f"\n{len(result[1].nodes)} result(s)")
     else:
         print(f"Error: {result[1].code}")
 

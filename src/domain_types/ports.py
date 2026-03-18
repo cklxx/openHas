@@ -1,4 +1,7 @@
-from typing import Literal, Protocol
+from typing import Protocol
+
+from .memory import ConsolidationAction, ExecutorError, MemoryNode, NodeWriteError
+from .result import Result
 
 
 class QueryFn(Protocol):
@@ -13,14 +16,27 @@ class EmbedFn(Protocol):
     async def __call__(self, text: str) -> tuple[float, ...]: ...
 
 
-class StoreFn(Protocol):
-    async def __call__(self, key: str, value: bytes) -> None: ...
-
-
 class SearchFn(Protocol):
     async def __call__(
         self, embedding: tuple[float, ...], top_k: int
     ) -> list[tuple[str, float]]: ...
+
+
+class StoreNodeFn(Protocol):
+    """Persist a MemoryNode to the storage backend."""
+    async def __call__(self, node: MemoryNode) -> Result[None, NodeWriteError]: ...
+
+
+class HydrateFn(Protocol):
+    """Fetch full MemoryNodes by ID. Returns only IDs that exist."""
+    async def __call__(self, ids: tuple[str, ...]) -> dict[str, MemoryNode]: ...
+
+
+class ConsolidationExecutorFn(Protocol):
+    """Apply consolidation actions against the storage backend."""
+    async def __call__(
+        self, actions: tuple[ConsolidationAction, ...]
+    ) -> Result[int, ExecutorError]: ...
 
 
 class NowFn(Protocol):
@@ -29,7 +45,7 @@ class NowFn(Protocol):
 
 class ClassifyFn(Protocol):
     """Classify content permanence: permanent, transient, or unknown."""
-    async def __call__(self, content: str) -> Literal['permanent', 'transient', 'unknown']: ...
+    async def __call__(self, content: str) -> str: ...
 
 
 class PredictQueryFn(Protocol):

@@ -1,6 +1,12 @@
-from .embeddings import make_embed_fn as make_embed_fn
+from .llama_classify import make_llama_classify_fn as make_llama_classify_fn
 from .llama_embed import make_doc_embed_fn as make_doc_embed_fn
 from .llama_embed import make_query_embed_fn as make_query_embed_fn
 from .llama_expand import make_llama_expand_fn as make_llama_expand_fn
 from .llama_predict import make_llama_predict_fn as make_llama_predict_fn
 from .sqlite_store import make_sqlite_query as make_sqlite_query
+from .sqlite_vec_store import load_graph as load_graph
+from .sqlite_vec_store import make_executor as make_executor
+from .sqlite_vec_store import make_hydrate_fn as make_hydrate_fn
+from .sqlite_vec_store import make_search_fn as make_search_fn
+from .sqlite_vec_store import make_store_fn as make_store_fn
+from .sqlite_vec_store import open_db as open_db
