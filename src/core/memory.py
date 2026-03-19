@@ -22,7 +22,7 @@ from src.domain_types.result import Result
 
 logger = logging.getLogger(__name__)
 
-_W_HYDE = 0.15
+_W_HYDE = 0.25
 _RERANK_FETCH_FACTOR = 5
 _HYDE_TIMEOUT = 5.0
 _RERANK_TIMEOUT = 30.0

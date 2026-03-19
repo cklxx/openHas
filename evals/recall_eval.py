@@ -441,12 +441,12 @@ def _make_base(ctx: _BaseCtx, use_hyde: bool):  # type: ignore[return]
     )
 
 
-async def _build_recall(
-    embed_url: str, predict_url: str, flags: _EvalFlags, hyde_weight: float = 0.15,
+def _build_from_db(
+    db_tuple: tuple[object, ...], predict_url: str,
+    flags: _EvalFlags, hyde_weight: float = 0.15,
 ):  # type: ignore[return]
-    query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids = (
-        await _setup_db(embed_url, predict_url)
-    )
+    """Build recall stack from pre-indexed DB — no re-indexing."""
+    query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids = db_tuple
     deps = RecallDeps(  # type: ignore[arg-type]
         search=search, query_embed=query_embed, hydrate=hydrate,
         primary_search=primary_search, hyde_weight=hyde_weight,
@@ -457,14 +457,21 @@ async def _build_recall(
     )
     recall = _make_base(ctx, flags.use_hyde)
     if flags.use_iterative:
-        recall = make_iterative_recall(recall, query_embed, search, hydrate)  # type: ignore[arg-type]
+        recall = make_iterative_recall(recall, query_embed, search, hydrate)
     if flags.use_rerank:
         recall = make_reranked_recall(
-            recall, make_llama_rerank_fn(predict_url), hydrate, decayed_ids,  # type: ignore[arg-type]
+            recall, make_llama_rerank_fn(predict_url), hydrate, decayed_ids,
         )
     if flags.use_rewrite:
-        recall = make_rewritten_recall(recall, make_llama_rewrite_fn(predict_url))  # type: ignore[arg-type]
+        recall = make_rewritten_recall(recall, make_llama_rewrite_fn(predict_url))
     return recall
+
+
+async def _build_recall(
+    embed_url: str, predict_url: str, flags: _EvalFlags, hyde_weight: float = 0.15,
+):  # type: ignore[return]
+    db_tuple = await _setup_db(embed_url, predict_url)
+    return _build_from_db(db_tuple, predict_url, flags, hyde_weight)
 
 
 _TUNE_GRID = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
@@ -476,16 +483,22 @@ def _mean_r1(rows: list[dict]) -> float:  # type: ignore[type-arg]
     return sum(_recall_at(r["returned"], r["expected"], 1) for r in rows) / len(rows)
 
 
-async def _run_tune(embed_url: str, predict_url: str, cases_path: str, flags: _EvalFlags) -> None:
+def _load_scored_cases(cases_path: str, category: str | None) -> list[dict]:  # type: ignore[type-arg]
     cases = _load_cases(cases_path)
-    if flags.category:
-        cases = [c for c in cases if c.get("category") == flags.category]
-    cases = [c for c in cases if not c.get("unanswerable")]
+    if category:
+        cases = [c for c in cases if c.get("category") == category]
+    return [c for c in cases if not c.get("unanswerable")]
+
+
+async def _run_tune(embed_url: str, predict_url: str, cases_path: str, flags: _EvalFlags) -> None:
+    """Grid search _W_HYDE — index once, vary only the blend weight."""
+    cases = _load_scored_cases(cases_path, flags.category)
     await asyncio.gather(_wait_ready(embed_url), _wait_ready(predict_url))
+    db_tuple = await _setup_db(embed_url, predict_url)
     print(f"Tuning _W_HYDE over {_TUNE_GRID} ({len(cases)} cases)\n")
     best_w, best_r1 = 0.15, 0.0
     for w in _TUNE_GRID:
-        recall = await _build_recall(embed_url, predict_url, flags, hyde_weight=w)
+        recall = _build_from_db(db_tuple, predict_url, flags, w)
         rows = await _run_recall(recall, cases)
         r1 = _mean_r1(rows)
         marker = " ← best" if r1 > best_r1 else ""
