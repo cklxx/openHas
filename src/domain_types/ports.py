@@ -73,6 +73,11 @@ class RerankFn(Protocol):
     async def __call__(self, query: str, nodes: list[MemoryNode]) -> list[str]: ...
 
 
+class RewriteQueryFn(Protocol):
+    """Rewrite a query to make implicit domain knowledge explicit."""
+    async def __call__(self, query: str) -> str: ...
+
+
 class UpdateNodeFn(Protocol):
     """Increment access_count + update last_accessed for recalled node IDs."""
     async def __call__(self, ids: tuple[str, ...]) -> Result[None, NodeWriteError]: ...

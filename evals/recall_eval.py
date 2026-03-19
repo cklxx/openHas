@@ -32,6 +32,7 @@ from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
 from src.adapters.llama_expand import make_llama_expand_fn
 from src.adapters.llama_hyde import make_llama_hyde_fn
 from src.adapters.llama_rerank import make_llama_rerank_fn
+from src.adapters.llama_rewrite import make_llama_rewrite_fn
 from src.adapters.sqlite_vec_store import (
     make_hydrate_fn,
     make_primary_search_fn,
@@ -48,6 +49,7 @@ from src.core.memory import (
     make_iterative_recall,
     make_recall,
     make_reranked_recall,
+    make_rewritten_recall,
 )
 from src.domain_types.memory import (
     Edge,
@@ -240,11 +242,15 @@ def _pad(s: str, width: int) -> str:
     return s + ' ' * max(width - _dw(s), 0)
 
 
+_EXPANSION_CACHE = Path(__file__).parent / "expansion_cache.json"
+
+
 @dataclass(frozen=True, slots=True)
 class _EvalFlags:
     use_hyde: bool
     use_iterative: bool
     use_rerank: bool
+    use_rewrite: bool
     category: str | None = None
 
 
@@ -335,6 +341,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Disable multi-hop iterative retrieval (faster, lower recall)")
     p.add_argument("--no-rerank", action="store_true",
                    help="Disable LLM reranker (faster, lower recall on cue/referential/multi-hop)")
+    p.add_argument("--rewrite", action="store_true",
+                   help="Enable query rewriting to surface implicit knowledge")
+    p.add_argument("--rebuild-expansion", action="store_true",
+                   help="Regenerate expansion cache (default: reuse if exists)")
     p.add_argument("--category", metavar="CAT",
                    help="Run only cases matching this category (see --list-categories)")
     p.add_argument("--list-categories", action="store_true",
@@ -354,14 +364,34 @@ def _compute_decayed_ids(graph: MemoryGraph) -> frozenset[str]:
     )
 
 
+def _load_expansion_cache() -> dict[str, list[str]] | None:
+    if _EXPANSION_CACHE.exists():
+        return json.loads(_EXPANSION_CACHE.read_text())  # type: ignore[no-any-return]
+    return None
+
+
+def _save_expansion_cache(cache: dict[str, list[str]]) -> None:
+    _EXPANSION_CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
+
+
+async def _expand_node(
+    nid: str, text: str, expand_fn: object, cache: dict[str, list[str]]
+) -> list[str]:
+    if nid in cache:
+        return cache[nid]
+    queries = await expand_fn(text)
+    cache[nid] = queries
+    return queries
+
+
 async def _store_corpus(conn: object, embed_url: str, predict_url: str) -> None:
     """Embed all corpus nodes + store expansion embeddings into DB."""
-    doc_embed = make_doc_embed_fn(embed_url)
-    query_embed = make_query_embed_fn(embed_url)
+    doc_embed, query_embed = make_doc_embed_fn(embed_url), make_query_embed_fn(embed_url)
     expand_fn = make_llama_expand_fn(predict_url)
+    node_map = {n.id: n for n in _build_memory_graph().nodes}
     store_fn = make_store_fn(conn, 'eval')  # type: ignore[arg-type]
     store_expansion = make_store_expansion_fn(conn, 'eval')  # type: ignore[arg-type]
-    node_map = {n.id: n for n in _build_memory_graph().nodes}
+    exp_cache: dict[str, list[str]] = _load_expansion_cache() or {}
     print(f"Embedding + expanding {len(_CORPUS)} corpus nodes …")
     for nid, text in _CORPUS:
         n = node_map[nid]
@@ -371,8 +401,10 @@ async def _store_corpus(conn: object, embed_url: str, predict_url: str) -> None:
             event_time=n.event_time, record_time=n.record_time,
             last_accessed=n.last_accessed, permanence=n.permanence, embedding=emb,
         ))
-        exp_embs = await asyncio.gather(*[query_embed(q) for q in await expand_fn(text)])
-        await store_expansion(nid, list(exp_embs))
+        queries = await _expand_node(nid, text, expand_fn, exp_cache)
+        await store_expansion(nid, list(await asyncio.gather(*[query_embed(q) for q in queries])))
+    if not _EXPANSION_CACHE.exists():
+        _save_expansion_cache(exp_cache)
 
 
 async def _setup_db(embed_url: str, predict_url: str) -> tuple[object, ...]:
@@ -390,6 +422,24 @@ async def _setup_db(embed_url: str, predict_url: str) -> tuple[object, ...]:
     return query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids
 
 
+@dataclass(frozen=True, slots=True)
+class _BaseCtx:
+    deps: RecallDeps
+    doc_embed: object
+    predict_url: str
+    update_access: object
+
+
+def _make_base(ctx: _BaseCtx, use_hyde: bool):  # type: ignore[return]
+    if use_hyde:
+        print("HyDE enabled — generating hypothetical snippets at query time")
+        hyde_fn = make_llama_hyde_fn(ctx.predict_url)
+        return make_hyde_recall(ctx.deps, ctx.doc_embed, hyde_fn, ctx.update_access)
+    return make_recall(
+        ctx.deps.search, ctx.deps.query_embed, ctx.deps.hydrate, ctx.update_access
+    )
+
+
 async def _build_recall(embed_url: str, predict_url: str, flags: _EvalFlags):  # type: ignore[return]
     query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids = (
         await _setup_db(embed_url, predict_url)
@@ -397,21 +447,21 @@ async def _build_recall(embed_url: str, predict_url: str, flags: _EvalFlags):  #
     deps = RecallDeps(  # type: ignore[arg-type]
         search=search, query_embed=query_embed, hydrate=hydrate, primary_search=primary_search,
     )
-    if flags.use_hyde:
-        print("HyDE enabled — generating hypothetical snippets at query time")
-        recall = make_hyde_recall(
-            deps, doc_embed, make_llama_hyde_fn(predict_url), update_access  # type: ignore[arg-type]
-        )
-    else:
-        recall = make_recall(search, query_embed, hydrate, update_access)  # type: ignore[arg-type]
+    ctx = _BaseCtx(
+        deps=deps, doc_embed=doc_embed,
+        predict_url=predict_url, update_access=update_access,
+    )
+    recall = _make_base(ctx, flags.use_hyde)
     if flags.use_iterative:
         print("Iterative retrieval enabled — two-round multi-hop search")
         recall = make_iterative_recall(recall, query_embed, search, hydrate)  # type: ignore[arg-type]
     if flags.use_rerank:
         print("LLM reranker enabled — reasoning pass over wider candidate pool")
-        recall = make_reranked_recall(
-            recall, make_llama_rerank_fn(predict_url), hydrate, decayed_ids  # type: ignore[arg-type]
-        )
+        rerank = make_llama_rerank_fn(predict_url)
+        recall = make_reranked_recall(recall, rerank, hydrate, decayed_ids)  # type: ignore[arg-type]
+    if flags.use_rewrite:
+        print("Query rewriting enabled — making implicit knowledge explicit")
+        recall = make_rewritten_recall(recall, make_llama_rewrite_fn(predict_url))  # type: ignore[arg-type]
     return recall
 
 
@@ -435,11 +485,15 @@ def _flags_from_args(args: argparse.Namespace) -> _EvalFlags:
         use_hyde=not args.no_hyde,
         use_iterative=not args.no_iterative,
         use_rerank=not args.no_rerank,
+        use_rewrite=args.rewrite,
         category=args.category,
     )
 
 
 async def _run_with_servers(args: argparse.Namespace) -> None:
+    if args.rebuild_expansion and _EXPANSION_CACHE.exists():
+        _EXPANSION_CACHE.unlink()
+        print("Expansion cache cleared — will regenerate")
     embed_path = args.embed_model or hf_hub_download(_EMBED_REPO, _EMBED_FILE)
     predict_path = args.predict_model or hf_hub_download(_PREDICT_REPO, _PREDICT_FILE)
     embed_url, predict_url = f"http://localhost:{_EMBED_PORT}", f"http://localhost:{_PREDICT_PORT}"

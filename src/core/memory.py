@@ -13,6 +13,7 @@ from src.domain_types.ports import (
     HydrateFn,
     NowFn,
     RerankFn,
+    RewriteQueryFn,
     SearchFn,
     StoreNodeFn,
     UpdateNodeFn,
@@ -25,6 +26,7 @@ _W_HYDE = 0.15
 _RERANK_FETCH_FACTOR = 5
 _HYDE_TIMEOUT = 5.0
 _RERANK_TIMEOUT = 30.0
+_REWRITE_TIMEOUT = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,5 +296,24 @@ def make_reranked_recall(
             (n.id for n in r[1].nodes), r[1].scores, strict=False  # type: ignore[index]
         ))
         return ('ok', _build_result(hydrated, ranked_ids[:query.top_k], score_map))
+
+    return recall
+
+
+def make_rewritten_recall(
+    base_recall: _RecallFn,
+    rewrite_fn: RewriteQueryFn,
+):
+    """Wrap a recall fn with query rewriting to surface implicit knowledge."""
+
+    async def recall(query: MemoryQuery) -> Result[RecallResult, RecallError]:
+        try:
+            rewritten = await asyncio.wait_for(
+                rewrite_fn(query.text), _REWRITE_TIMEOUT
+            )
+        except Exception as exc:
+            logger.warning("Rewrite fallback (non-fatal): %s", exc)
+            rewritten = query.text
+        return await base_recall(MemoryQuery(text=rewritten, top_k=query.top_k))
 
     return recall
