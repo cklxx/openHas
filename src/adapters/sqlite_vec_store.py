@@ -226,24 +226,58 @@ def make_store_fn(conn: sqlite3.Connection, user_id: str) -> StoreNodeFn:
     return store  # type: ignore[return-value]
 
 
+def _node_matches_filter(
+    row: dict[str, Any], kind_set: set[str], label_set: set[str]
+) -> bool:
+    if kind_set and row['kind'] not in kind_set:
+        return False
+    return not label_set or bool(label_set.intersection(json.loads(row['labels'])))
+
+
+def _filtered_node_ids(
+    conn: sqlite3.Connection, node_ids: list[str], user_id: str,
+    filters: tuple[tuple[str, ...], tuple[str, ...]],
+) -> set[str]:
+    """Return node_ids that match the given kind/label filters."""
+    placeholders = ','.join('?' * len(node_ids))
+    rows = conn.execute(
+        f"SELECT id, kind, labels FROM nodes WHERE id IN ({placeholders}) AND user_id = ?",
+        (*node_ids, user_id),
+    ).fetchall()
+    ks, ls = set(filters[0]), set(filters[1])
+    return {str(r['id']) for r in rows if _node_matches_filter(r, ks, ls)}
+
+
+def _score_and_rank(
+    meta: list[dict[str, Any]], dist_map: dict[int, float],
+    decay: dict[str, float], top_k: int,
+) -> list[tuple[str, float]]:
+    scores = _dedup_scores(meta, dist_map, decay)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+
+
 def _make_search(
     conn: sqlite3.Connection, user_id: str, primary_only: bool
 ) -> SearchFn:
     async def search(
-        embedding: tuple[float, ...], top_k: int
+        embedding: tuple[float, ...], top_k: int,
+        kinds: tuple[str, ...] = (), labels: tuple[str, ...] = (),
     ) -> list[tuple[str, float]]:
+        fetch_k = top_k * (6 if kinds or labels else 3)
         emb_blob = struct.pack(f'{len(embedding)}f', *embedding)
-        knn = _knn_rows(conn, emb_blob, top_k * 3)
+        knn = _knn_rows(conn, emb_blob, fetch_k)
         if not knn:
             return []
-        dist_map: dict[int, float] = {int(r['rowid']): float(r['distance']) for r in knn}
+        dist_map = {int(r['rowid']): float(r['distance']) for r in knn}
         meta = _meta_rows(conn, list(dist_map.keys()), user_id, primary_only)
-        if not meta:
-            return []
         node_ids = list({str(r['node_id']) for r in meta})
-        decay = _decay_map(conn, node_ids, user_id)
-        scores = _dedup_scores(meta, dist_map, decay)
-        return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        if kinds or labels:
+            allowed = _filtered_node_ids(conn, node_ids, user_id, (kinds, labels))
+            meta = [r for r in meta if str(r['node_id']) in allowed]
+            node_ids = [n for n in node_ids if n in allowed]
+        if not node_ids:
+            return []
+        return _score_and_rank(meta, dist_map, _decay_map(conn, node_ids, user_id), top_k)
 
     return search  # type: ignore[return-value]
 

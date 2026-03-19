@@ -14,7 +14,7 @@ async def _embed(text: str) -> tuple[float, ...]:
     return (0.1, 0.2)
 
 
-async def _search(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+async def _search(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
     return [('vegetarian-node', 0.9)]
 
 

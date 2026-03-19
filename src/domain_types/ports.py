@@ -18,7 +18,8 @@ class EmbedFn(Protocol):
 
 class SearchFn(Protocol):
     async def __call__(
-        self, embedding: tuple[float, ...], top_k: int
+        self, embedding: tuple[float, ...], top_k: int,
+        kinds: tuple[str, ...] = (), labels: tuple[str, ...] = (),
     ) -> list[tuple[str, float]]: ...
 
 

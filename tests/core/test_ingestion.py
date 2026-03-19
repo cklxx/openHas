@@ -15,7 +15,7 @@ async def _embed(text: str) -> tuple[float, ...]:
     return (0.5, 0.5, 0.5)
 
 
-async def _search_empty(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+async def _search_empty(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
     return []
 
 
@@ -43,7 +43,7 @@ async def test_stores_valuable_content_includes_node() -> None:
 
 @pytest.mark.asyncio
 async def test_detects_near_duplicate() -> None:
-    async def search_hits(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search_hits(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('n1', 0.95)]
 
     gate = make_ingestion_gate(_classify_permanent, _embed, lambda: 2.0, search_hits)  # type: ignore[arg-type]
