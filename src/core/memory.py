@@ -132,13 +132,14 @@ async def _safe_hyde_snippets(
 
 
 async def _compute_hyde_scores(
-    doc_embed: EmbedFn,
-    search: SearchFn,
-    snippets: list[str],
-    fetch_k: int,
+    doc_embed: EmbedFn, search: SearchFn,
+    snippets: list[str], query: MemoryQuery,
 ) -> dict[str, float]:
+    fetch_k = query.top_k * _RERANK_FETCH_FACTOR
     embs = await asyncio.gather(*[doc_embed(s) for s in snippets])
-    searches = await asyncio.gather(*[search(e, fetch_k) for e in embs])
+    searches = await asyncio.gather(
+        *[search(e, fetch_k, query.kinds, query.labels) for e in embs]
+    )
     return _merge_scores(list(searches))
 
 
@@ -203,7 +204,7 @@ def make_recall(
             return ('err', RecallError(code='EMPTY_QUERY'))
         try:
             q_emb = await embed(query.text)
-            hits = await search(q_emb, query.top_k)
+            hits = await search(q_emb, query.top_k, query.kinds, query.labels)
         except Exception as e:
             return ('err', RecallError(code='SEARCH_FAILED', detail=str(e)))
         hits_map = dict(hits)
@@ -228,12 +229,13 @@ def make_hyde_recall(
             return ('err', RecallError(code='EMPTY_QUERY'))
         try:
             q_emb = await deps.query_embed(query.text)
-            base_hits = await deps.search(q_emb, query.top_k * _RERANK_FETCH_FACTOR)
+            base_hits = await deps.search(
+                q_emb, query.top_k * _RERANK_FETCH_FACTOR, query.kinds, query.labels,
+            )
         except Exception as e:
             return ('err', RecallError(code='SEARCH_FAILED', detail=str(e)))
         snippets = await _safe_hyde_snippets(hyde_fn, query.text)
-        fetch_k = query.top_k * _RERANK_FETCH_FACTOR
-        hyde_map = await _compute_hyde_scores(doc_embed, deps.primary_search, snippets, fetch_k)
+        hyde_map = await _compute_hyde_scores(doc_embed, deps.primary_search, snippets, query)
         top_ids, blended = _blend_and_rank(base_hits, hyde_map, query.top_k)
         hydrated = await deps.hydrate(tuple(top_ids))
         result = _build_result(hydrated, top_ids, blended)
@@ -258,7 +260,7 @@ def make_iterative_recall(
         ctx = ' '.join(n.content for n in r1[1].nodes[:3])
         try:
             r2_emb = await query_embed(f"{query.text} {ctx}")
-            r2_hits = await search(r2_emb, query.top_k)
+            r2_hits = await search(r2_emb, query.top_k, query.kinds, query.labels)
         except Exception:
             return r1  # type: ignore[return-value]
         r1_map = dict(zip((n.id for n in r1[1].nodes), r1[1].scores, strict=False))

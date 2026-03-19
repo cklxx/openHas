@@ -70,7 +70,7 @@ async def test_recall_rejects_empty_query() -> None:
     async def embed(text: str) -> tuple[float, ...]:
         return (0.0,)
 
-    async def search(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return []
 
     recall = make_recall(search, embed, _noop_hydrate)  # type: ignore[arg-type]
@@ -83,7 +83,7 @@ async def test_recall_returns_hits() -> None:
     async def embed(text: str) -> tuple[float, ...]:
         return (0.5,)
 
-    async def search(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('node1', 0.9), ('node2', 0.7)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -101,7 +101,7 @@ async def test_recall_calls_hydrate() -> None:
     async def embed(t: str) -> tuple[float, ...]:
         return (0.5,)
 
-    async def search(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('node1', 0.9)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -118,7 +118,7 @@ async def test_recall_hydrate_skips_missing() -> None:
     async def embed(t: str) -> tuple[float, ...]:
         return (0.5,)
 
-    async def search(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('n1', 0.9), ('n2', 0.7), ('n3', 0.5)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -147,7 +147,7 @@ async def test_recall_search_fails() -> None:
     async def embed(t: str) -> tuple[float, ...]:
         return (0.1,)
 
-    async def bad_search(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def bad_search(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         raise RuntimeError("down")
 
     result = await make_recall(bad_search, embed, _noop_hydrate)(  # type: ignore[arg-type]
@@ -163,7 +163,7 @@ async def test_recall_passes_top_k_to_search() -> None:
     async def embed(t: str) -> tuple[float, ...]:
         return (0.1,)
 
-    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(e: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         seen.append(k)
         return []
 
@@ -178,7 +178,7 @@ async def _stub_embed(t: str) -> tuple[float, ...]:
 @given(n=st.integers(min_value=0, max_value=15))
 @settings(max_examples=20)
 async def test_scores_length_always_matches_nodes(n: int) -> None:
-    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(e: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [(f"n{i}", 0.5) for i in range(n)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -192,7 +192,7 @@ async def test_scores_length_always_matches_nodes(n: int) -> None:
 
 @pytest.mark.asyncio
 async def test_hyde_recall_timeout_falls_back_to_base() -> None:
-    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(e: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('n1', 0.9)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -212,7 +212,7 @@ async def test_hyde_recall_timeout_falls_back_to_base() -> None:
 
 @pytest.mark.asyncio
 async def test_hyde_recall_empty_snippets_returns_base() -> None:
-    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(e: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('n1', 0.9)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -254,7 +254,7 @@ async def test_iterative_recall_r1_empty_returns_r1() -> None:
     async def base_recall(query: MemoryQuery):  # type: ignore[return]
         return ('ok', type('R', (), {'nodes': (), 'scores': ()})())
 
-    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(e: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('n1', 0.9)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -269,7 +269,7 @@ async def test_iterative_recall_r1_empty_returns_r1() -> None:
 async def test_recall_updates_access_count() -> None:
     updated: list[tuple[str, ...]] = []
 
-    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(e: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('n1', 0.9)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -286,7 +286,7 @@ async def test_recall_updates_access_count() -> None:
 
 @pytest.mark.asyncio
 async def test_recall_access_update_failure_does_not_fail_recall() -> None:
-    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(e: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return [('n1', 0.9)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
@@ -331,3 +331,25 @@ async def test_rewritten_recall_timeout_falls_back() -> None:
     recall = make_rewritten_recall(base_recall, slow_rewrite)  # type: ignore[arg-type]
     await recall(MemoryQuery(text='original'))
     assert queries_seen == ['original']
+
+
+@pytest.mark.asyncio
+async def test_recall_passes_kinds_and_labels_to_search() -> None:
+    seen_kinds: list[tuple[str, ...]] = []
+    seen_labels: list[tuple[str, ...]] = []
+
+    async def search(
+        e: tuple[float, ...], k: int,
+        kinds: tuple[str, ...] = (), labels: tuple[str, ...] = (),
+    ) -> list[tuple[str, float]]:
+        seen_kinds.append(kinds)
+        seen_labels.append(labels)
+        return [('n1', 0.9)]
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    recall = make_recall(search, _stub_embed, hydrate)  # type: ignore[arg-type]
+    await recall(MemoryQuery(text='q', kinds=('fact',), labels=('work',)))
+    assert seen_kinds == [('fact',)]
+    assert seen_labels == [('work',)]

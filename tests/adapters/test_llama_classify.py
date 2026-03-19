@@ -59,7 +59,7 @@ async def test_classify_timeout_returns_classify_failed() -> None:
     async def embed(t: str) -> tuple[float, ...]:
         return (0.1,)
 
-    async def search(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return []
 
     gate = make_ingestion_gate(timeout_classify, embed, lambda: 1.0, search)  # type: ignore[arg-type]
@@ -81,7 +81,7 @@ async def test_classify_5xx_returns_classify_failed() -> None:
     async def embed(t: str) -> tuple[float, ...]:
         return (0.1,)
 
-    async def search(emb: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+    async def search(emb: tuple[float, ...], k: int, *_: object) -> list[tuple[str, float]]:
         return []
 
     gate = make_ingestion_gate(http_error_classify, embed, lambda: 1.0, search)  # type: ignore[arg-type]
