@@ -11,6 +11,7 @@ from src.core.memory import (
     make_iterative_recall,
     make_recall,
     make_reranked_recall,
+    make_rewritten_recall,
     make_store_memory,
 )
 from src.domain_types.memory import MemoryNode, MemoryQuery
@@ -297,3 +298,36 @@ async def test_recall_access_update_failure_does_not_fail_recall() -> None:
     recall = make_recall(search, _stub_embed, hydrate, bad_update)  # type: ignore[arg-type]
     result = await recall(MemoryQuery(text='q'))
     assert result[0] == 'ok'
+
+
+@pytest.mark.asyncio
+async def test_rewritten_recall_rewrites_query() -> None:
+    queries_seen: list[str] = []
+
+    async def base_recall(query: MemoryQuery):  # type: ignore[return]
+        queries_seen.append(query.text)
+        return ('ok', type('R', (), {'nodes': (), 'scores': ()})())
+
+    async def rewrite(q: str) -> str:
+        return f"REWRITTEN: {q}"
+
+    recall = make_rewritten_recall(base_recall, rewrite)  # type: ignore[arg-type]
+    await recall(MemoryQuery(text='original'))
+    assert queries_seen == ['REWRITTEN: original']
+
+
+@pytest.mark.asyncio
+async def test_rewritten_recall_timeout_falls_back() -> None:
+    queries_seen: list[str] = []
+
+    async def base_recall(query: MemoryQuery):  # type: ignore[return]
+        queries_seen.append(query.text)
+        return ('ok', type('R', (), {'nodes': (), 'scores': ()})())
+
+    async def slow_rewrite(q: str) -> str:
+        await asyncio.sleep(60)
+        return "never"
+
+    recall = make_rewritten_recall(base_recall, slow_rewrite)  # type: ignore[arg-type]
+    await recall(MemoryQuery(text='original'))
+    assert queries_seen == ['original']
