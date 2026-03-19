@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _W_HYDE = 0.15
 _RERANK_FETCH_FACTOR = 3
 _HYDE_TIMEOUT = 5.0
-_RERANK_TIMEOUT = 10.0
+_RERANK_TIMEOUT = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,7 @@ class RecallDeps:
     search: SearchFn
     query_embed: EmbedFn
     hydrate: HydrateFn
+    primary_search: SearchFn  # doc-side only — used by HyDE to avoid expansion contamination
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
@@ -230,7 +231,7 @@ def make_hyde_recall(
             return ('err', RecallError(code='SEARCH_FAILED', detail=str(e)))
         snippets = await _safe_hyde_snippets(hyde_fn, query.text)
         fetch_k = query.top_k * _RERANK_FETCH_FACTOR
-        hyde_map = await _compute_hyde_scores(doc_embed, deps.search, snippets, fetch_k)
+        hyde_map = await _compute_hyde_scores(doc_embed, deps.primary_search, snippets, fetch_k)
         top_ids, blended = _blend_and_rank(base_hits, hyde_map, query.top_k)
         hydrated = await deps.hydrate(tuple(top_ids))
         result = _build_result(hydrated, top_ids, blended)

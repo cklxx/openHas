@@ -201,7 +201,9 @@ async def test_hyde_recall_timeout_falls_back_to_base() -> None:
         await asyncio.sleep(100)
         return []
 
-    deps = RecallDeps(search=search, query_embed=_stub_embed, hydrate=hydrate)  # type: ignore[arg-type]
+    deps = RecallDeps(  # type: ignore[arg-type]
+        search=search, query_embed=_stub_embed, hydrate=hydrate, primary_search=search,
+    )
     recall = make_hyde_recall(deps, _stub_embed, slow_hyde)  # type: ignore[arg-type]
     result = await recall(MemoryQuery(text='q', top_k=1))
     assert result[0] == 'ok' and len(result[1].nodes) == 1
@@ -218,7 +220,9 @@ async def test_hyde_recall_empty_snippets_returns_base() -> None:
     async def empty_hyde(text: str) -> list[str]:
         return []
 
-    deps = RecallDeps(search=search, query_embed=_stub_embed, hydrate=hydrate)  # type: ignore[arg-type]
+    deps = RecallDeps(  # type: ignore[arg-type]
+        search=search, query_embed=_stub_embed, hydrate=hydrate, primary_search=search,
+    )
     recall = make_hyde_recall(deps, _stub_embed, empty_hyde)  # type: ignore[arg-type]
     result = await recall(MemoryQuery(text='q', top_k=1))
     assert result[0] == 'ok' and result[1].nodes[0].id == 'n1'

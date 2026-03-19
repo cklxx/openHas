@@ -67,9 +67,10 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind, user_id);
 CREATE TABLE IF NOT EXISTS vec_meta (
-    rowid    INTEGER PRIMARY KEY,
-    node_id  TEXT NOT NULL,
-    user_id  TEXT NOT NULL DEFAULT 'default'
+    rowid      INTEGER PRIMARY KEY,
+    node_id    TEXT NOT NULL,
+    user_id    TEXT NOT NULL DEFAULT 'default',
+    is_primary INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_vec_meta_user ON vec_meta(user_id, node_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(embedding float[{dim}]);
@@ -129,11 +130,13 @@ def _knn_rows(conn: sqlite3.Connection, emb_blob: bytes, n: int) -> list[dict[st
 
 
 def _meta_rows(
-    conn: sqlite3.Connection, rowids: list[int], user_id: str
+    conn: sqlite3.Connection, rowids: list[int], user_id: str, primary_only: bool = False
 ) -> list[dict[str, Any]]:
     ph = ','.join('?' * len(rowids))
+    clause = " AND is_primary = 1" if primary_only else ""
     return [dict(r) for r in conn.execute(
-        f"SELECT rowid, node_id FROM vec_meta WHERE rowid IN ({ph}) AND user_id = ?",
+        f"SELECT rowid, node_id, is_primary FROM vec_meta"
+        f" WHERE rowid IN ({ph}) AND user_id = ?{clause}",
         (*rowids, user_id),
     ).fetchall()]
 
@@ -149,6 +152,11 @@ def _decay_map(
     return {r['id']: float(r['decay_factor']) for r in rows}
 
 
+def _best(d: dict[str, float], nid: str, score: float) -> None:
+    if score > d.get(nid, -1.0):
+        d[nid] = score
+
+
 def _dedup_scores(
     meta: list[dict[str, Any]],
     dist_map: dict[int, float],
@@ -160,8 +168,7 @@ def _dedup_scores(
         nid: str = row['node_id']
         cosine = max(1.0 - dist_map[int(row['rowid'])] ** 2 / 2.0, 0.0)
         score = cosine * decay.get(nid, 1.0)
-        if nid not in seen or score > seen[nid]:
-            seen[nid] = score
+        _best(seen, nid, score)
     return seen
 
 
@@ -219,9 +226,9 @@ def make_store_fn(conn: sqlite3.Connection, user_id: str) -> StoreNodeFn:
     return store  # type: ignore[return-value]
 
 
-def make_search_fn(conn: sqlite3.Connection, user_id: str) -> SearchFn:
-    """Return a SearchFn scoped to user_id."""
-
+def _make_search(
+    conn: sqlite3.Connection, user_id: str, primary_only: bool
+) -> SearchFn:
     async def search(
         embedding: tuple[float, ...], top_k: int
     ) -> list[tuple[str, float]]:
@@ -230,7 +237,7 @@ def make_search_fn(conn: sqlite3.Connection, user_id: str) -> SearchFn:
         if not knn:
             return []
         dist_map: dict[int, float] = {int(r['rowid']): float(r['distance']) for r in knn}
-        meta = _meta_rows(conn, list(dist_map.keys()), user_id)
+        meta = _meta_rows(conn, list(dist_map.keys()), user_id, primary_only)
         if not meta:
             return []
         node_ids = list({str(r['node_id']) for r in meta})
@@ -239,6 +246,19 @@ def make_search_fn(conn: sqlite3.Connection, user_id: str) -> SearchFn:
         return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
 
     return search  # type: ignore[return-value]
+
+
+def make_search_fn(conn: sqlite3.Connection, user_id: str) -> SearchFn:
+    """Return a SearchFn scoped to user_id (blends primary + expansion scores)."""
+    return _make_search(conn, user_id, primary_only=False)
+
+
+def make_primary_search_fn(conn: sqlite3.Connection, user_id: str) -> SearchFn:
+    """Return a SearchFn that searches only primary (doc-side) embeddings.
+
+    Used by HyDE to avoid querying expansion (query-side) rows with a doc embedding.
+    """
+    return _make_search(conn, user_id, primary_only=True)
 
 
 def make_hydrate_fn(conn: sqlite3.Connection, user_id: str) -> HydrateFn:
@@ -317,8 +337,8 @@ def make_store_expansion_fn(
                     (struct.pack(f'{len(emb)}f', *emb),),
                 )
                 conn.execute(
-                    "INSERT INTO vec_meta(rowid, node_id, user_id) "
-                    "VALUES (last_insert_rowid(), ?, ?)",
+                    "INSERT INTO vec_meta(rowid, node_id, user_id, is_primary) "
+                    "VALUES (last_insert_rowid(), ?, ?, 0)",
                     (node_id, user_id),
                 )
                 count += 1
