@@ -1,0 +1,233 @@
+{
+  "diet-veg": [
+    "What is the main ingredient in the dish you ordered for dinner?",
+    "Which of these restaurants would you be able to visit today without violating your dietary rules?",
+    "Can you eat the seafood pasta you saw on the menu?",
+    "What specific protein source did you choose for your lunch?",
+    "Why did you decline the chicken soup offered by the waiter?"
+  ],
+  "health-lactose": [
+    "Can I recommend a dessert that uses milk as a main ingredient for the user?",
+    "What specific ingredients in the user's favorite pasta sauce might cause digestive issues?",
+    "When is the user available to eat out, given their dietary restrictions?",
+    "Which of the user's recent meals likely led to the digestive discomfort?",
+    "Does the user have any specific food allergies besides lactose intolerance?"
+  ],
+  "health-back": [
+    "What is the maximum duration the user can sit before needing to stand up?",
+    "Why did the user request a standing break after 90 minutes of work?",
+    "Can the user comfortably sit in the office chair for the full 2-hour meeting without interruption?",
+    "What time should the user stand up if they have been sitting continuously since 10 AM?",
+    "Why was the user unable to attend the 3-hour workshop despite being invited?"
+  ],
+  "health-migraine": [
+    "Why did the user refuse to watch the movie on their phone in the dark room?",
+    "What ingredient in the user's favorite smoothie recipe caused their headache last week?",
+    "Why was the user unable to attend the live concert despite having a ticket?",
+    "How did the user manage to finish their work presentation without getting a migraine?",
+    "Why did the user switch from their usual laptop to a tablet for reading the news?"
+  ],
+  "health-meds": [
+    "If the user drinks grapefruit juice today, can they take their prescribed medication?",
+    "What ingredients in the user's favorite cocktail would make it unsafe to consume with their daily pill?",
+    "Why did the user's doctor specifically warn against mixing their medication with grapefruit juice?",
+    "How does the user's medication schedule change if they accidentally drank alcohol yesterday?",
+    "What specific dietary restriction must the user follow while taking this medication to avoid a dangerous interaction?"
+  ],
+  "partner-allergy": [
+    "What ingredients should be avoided in the birthday cake for your partner?",
+    "Which dish at the restaurant would be safe for your partner to eat?",
+    "Why can't you take your partner to that seafood buffet?",
+    "What snack from the vending machine is off-limits for your partner?",
+    "How do you explain the peanut butter sandwich incident to your partner's new friend?"
+  ],
+  "food-spicy": [
+    "What is the most likely cuisine type for the restaurant where the user recently ordered a meal?",
+    "Which ingredient should be avoided in the user's next meal to prevent an adverse reaction?",
+    "Why did the user feel satisfied after eating the spicy dish at the local restaurant?",
+    "What dietary preference does the user have that makes them a regular customer at that specific restaurant?",
+    "How does the user's love for Sichuan cuisine influence their choice of food when traveling to China?"
+  ],
+  "sched-sync": [
+    "If you need to schedule a meeting with the engineering team for next Tuesday, what time is the weekly product sync?",
+    "Why did the project manager miss the Tuesday 2pm meeting with the engineering team?",
+    "What time is the next available slot for the weekly product sync with the engineering team?",
+    "Can you tell me the schedule for the weekly product sync every Tuesday with the engineering team?",
+    "Why couldn't the marketing team attend the Tuesday 2pm product sync with the engineering team?"
+  ],
+  "sched-sync-new": [
+    "What is the new time for the product sync meeting?",
+    "When can I attend the product sync without conflicting with my Thursday 4pm appointment?",
+    "Why was the product sync moved from Tuesday 2pm?",
+    "What time should I set my calendar for the rescheduled product sync?",
+    "If I was originally booked on Tuesday at 2pm, why can't I attend the product sync now?"
+  ],
+  "sched-1on1": [
+    "What time is your manager's biweekly 1:1 scheduled for?",
+    "Can you attend your manager's meeting this Monday morning?",
+    "Why did you miss your scheduled 1:1 with your manager?",
+    "What is the specific day of the week for your biweekly check-in?",
+    "Which Monday is the next time you have your 1:1 with your manager?"
+  ],
+  "work-deadline": [
+    "Can you finish the sprint report before the Friday end-of-day deadline?",
+    "What ingredients can I use in the recipe since you're allergic to the ones listed in your high-priority food restrictions?",
+    "When is the best time to call you given your current sprint deadline is Friday end-of-day?",
+    "Which project timeline conflicts with your high-priority sprint deadline this Friday?",
+    "Can you join the meeting scheduled for Friday afternoon considering your sprint deadline is end-of-day?"
+  ],
+  "work-remote": [
+    "What is the earliest day the user can attend a mandatory in-person team meeting?",
+    "Which day is the only time the user is unavailable for a client call requiring their physical presence?",
+    "If the user wants to schedule a lunch meeting with a colleague who works remotely, which day should be avoided to ensure they are in the office?",
+    "What is the maximum number of full workdays the user has in a week where they are not at their home office?",
+    "On which day can the user potentially be caught in a traffic jam if they were forced to commute to the office?"
+  ],
+  "focus-block": [
+    "Why did the user miss the 3pm meeting?",
+    "What ingredient should the user avoid in their lunch if they are following their deep work schedule?",
+    "Can the user respond to the urgent Slack message sent at 4pm?",
+    "Why did the user choose to work on the report at 10am instead of 2pm?",
+    "What time should the user set their calendar alarm for to ensure they are not disturbed during their focus block?"
+  ],
+  "work-role-old": [
+    "If the user is unavailable for the upcoming sprint review, is it because they are still working on their senior-level architecture design?",
+    "Does the user's seniority level require them to mentor the junior developer on this specific module?",
+    "Can the user approve the budget for the new cloud infrastructure since they are a senior engineer with final sign-off authority?",
+    "Why did the user decline the travel request to the conference, given their senior role demands they stay for the quarterly code review?",
+    "Is the user eligible for the executive compensation package based on their senior software engineer status?"
+  ],
+  "work-role-new": [
+    "What is the earliest possible date the user could have started their new engineering manager role?",
+    "Why was the user unavailable for the project review scheduled last Tuesday?",
+    "Which team member is eligible to be the user's direct supervisor given the recent promotion timeline?",
+    "Can the user attend the annual leadership workshop that started three months ago?",
+    "What is the maximum duration the user has been in their current engineering manager position?"
+  ],
+  "home-city": [
+    "If you are planning a last-minute dinner in Jing'an, which restaurant do you recommend that is open late?",
+    "What is the name of the subway station closest to your home in Jing'an?",
+    "You mentioned you can't leave your apartment until 8 PM; what are you doing right now?",
+    "Where is the nearest 24-hour pharmacy to your residence in Jing'an?",
+    "If you need to buy fresh seafood today, which market in Jing'an district is closest to where you live?"
+  ],
+  "home-prev": [
+    "If you are planning a trip to Beijing and want to meet the person who lived there for 5 years, when can you schedule the meeting?",
+    "Which city should the user avoid if they are looking for someone who has never resided there for more than 5 years?",
+    "Why is the user's background in Beijing relevant to a job interview for a company based in Shanghai?",
+    "If the user is writing a memoir about their 5-year stay in Beijing, which chapter should they focus on first?",
+    "Can the user qualify for a Beijing-specific residency benefit program given their 5-year history there?"
+  ],
+  "routine-run": [
+    "What is the earliest time the user can start their morning run today?",
+    "Can the user run 5km this morning if it is raining?",
+    "What activity is the user doing right now at 7:30 AM on a sunny day?",
+    "Which days this week will the user NOT run 5km?",
+    "If the user plans to run before 8am, what weather condition must be met?"
+  ],
+  "drink-coffee": [
+    "What does the user drink in the morning?",
+    "Which ingredients are excluded from the user's morning coffee?",
+    "Can the user have a sugar-free latte at 8 AM?",
+    "What is the user's preferred way of drinking coffee?",
+    "Is the user allergic to milk or sugar?"
+  ],
+  "sleep-habit": [
+    "What time is the user currently available for a late-night study session?",
+    "Which of the user's daily routines includes a 7.5-hour sleep cycle?",
+    "If the user needs to wake up at 6:30am, what time did they go to bed?",
+    "What is the total duration of the user's nightly sleep?",
+    "When is the user most likely to be exhausted due to their consistent bedtime?"
+  ],
+  "gym-habit": [
+    "What time is the gym open on Tuesday evening?",
+    "Why did the user miss their usual workout yesterday?",
+    "Which days does the user avoid for gym sessions?",
+    "What is the user's schedule for Thursday nights?",
+    "Why couldn't the user go to the gym this past Tuesday evening?"
+  ],
+  "family-kids": [
+    "If the 8-year-old needs to go to a special music recital after school, can they leave with the parent?",
+    "What time does the 5-year-old's after-school soccer practice start, and can the parent attend?",
+    "Why is the parent unable to take the 8-year-old to the library story hour at 4:30 PM?",
+    "If the 4 PM school pickup is delayed, what alternative plan is needed for the 5-year-old's swim lesson?",
+    "Why does the parent need to arrive at the school gate by 3:55 PM specifically?"
+  ],
+  "partner-diet": [
+    "What is the best dish to order for User's partner at a restaurant that serves steak?",
+    "Which ingredient in the salad should be removed to accommodate User's partner's diet?",
+    "Can User's partner eat the chicken nuggets in the kids' menu?",
+    "What should User tell the chef when making User's partner's favorite pasta dish?",
+    "Is the beef stew suitable for User's partner to eat tonight?"
+  ],
+  "parent-care": [
+    "What time does the user's father need dinner assistance?",
+    "Can the user visit the father's room at 9 PM?",
+    "What specific medication does the father take in the evening that requires supervision?",
+    "Is the father's evening mobility limited to the living room only?",
+    "What is the maximum duration the user can leave the father unattended after 6 PM?"
+  ],
+  "hobby-jazz": [
+    "Which jazz album did the user record on Saturday morning?",
+    "What ingredients can the user safely eat on Sunday without worrying about playing jazz?",
+    "Why was the user unable to attend the Monday jazz club rehearsal?",
+    "Which weekend schedule slot is the user free for piano practice?",
+    "What specific jazz piece did the user learn while eating the user's favorite meal on Friday?"
+  ],
+  "lang-native": [
+    "What is the user's native language?",
+    "Which language should the user primarily use for their daily communication?",
+    "If the user asks for a translation tool, which language pair should be prioritized?",
+    "In a multilingual conversation setting, which language does the user consider their mother tongue?",
+    "When setting up a language learning profile for the user, which language should be marked as the primary one?"
+  ],
+  "lang-third": [
+    "¿Cuál es la diferencia entre usar \"ser\" y \"estar\" en una oración donde el usuario necesita expresar una característica temporal?",
+    "¿Qué respuesta es correcta para completar la frase \"Yo ___ cansado después de estudiar\" según su nivel actual?",
+    "¿Qué verbo conjugado en presente de indicativo usaría en un diálogo de compra si el usuario conoce la regla de la B1?",
+    "¿En qué contexto gramatical sería inapropiado para un estudiante B1 usar el subjuntivo imperfecto?",
+    "¿Qué vocabulario específico sobre verbos de movimiento debe dominar antes de intentar narrar un viaje en pasado?"
+  ],
+  "tech-stack": [
+    "If you are asked to choose between Python and Go for a new project, which language would you recommend based on your 8 years of engineering experience?",
+    "Which programming language has been your primary focus for the last 8 years of your engineering career?",
+    "You mentioned you have 8 years of experience; which two languages have defined that period of your work?",
+    "Given your 8 years of engineering background, which languages would you consider most relevant for a senior role?",
+    "Why would a hiring manager specifically ask about your experience with Python and Go after knowing you have 8 years in engineering?"
+  ],
+  "comm-style": [
+    "If you are trying to contact the user urgently, which method should you avoid?",
+    "What is the best way to reach the user for a non-urgent matter?",
+    "Why did the user decline the phone call yesterday?",
+    "How should the user's team schedule a meeting with them?",
+    "What type of communication did the user prefer when they were sick last week?"
+  ],
+  "travel-pref": [
+    "What is the best seat for User on the next flight?",
+    "Which seat should User request for the flight to London?",
+    "What seat did User choose for the flight to Tokyo?",
+    "Can User sit in the middle seat on the flight to New York?",
+    "Where should User sit on the flight to Paris?"
+  ],
+  "budget-travel": [
+    "If the flight from Beijing to Shanghai takes 2 hours, which class should the user book?",
+    "The user is traveling from London to New York (flight time 7 hours). What is the expected cost category for this trip?",
+    "Why did the user choose a budget airline for the Tokyo trip instead of a full-service carrier?",
+    "The user is planning a 10-hour journey from Paris to Cairo. Which ticket type will they definitely not consider?",
+    "Given the user's preference, why is a 3-hour flight from Los Angeles to San Francisco likely to be booked in economy?"
+  ],
+  "value-privacy": [
+    "If I ask you to recommend a free social media app that tracks your browsing history for ads, which one would you refuse to download?",
+    "Why did you choose to install the privacy-focused email client instead of the popular free alternative?",
+    "Which of these two mobile games would you avoid downloading because it requires user data tracking?",
+    "If you need to share a sensitive photo with a friend, why did you select the encrypted messaging app over the standard one?",
+    "What is the main reason you deleted the cloud storage app that offered free unlimited space?"
+  ],
+  "value-worklife": [
+    "If I send a work message to the user at 10 PM, will they see it immediately?",
+    "What is the most likely reason the user ignored my email sent yesterday at 9:30 PM?",
+    "Why did the user refuse to attend the late-night project meeting scheduled for 9:15 PM?",
+    "How should I phrase my request to the user if I need urgent help after 9 PM?",
+    "What time should I stop sending work-related texts to respect the user's boundaries?"
+  ]
+}

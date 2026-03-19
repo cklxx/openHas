@@ -5,6 +5,7 @@ from .llama_expand import make_llama_expand_fn as make_llama_expand_fn
 from .llama_hyde import make_llama_hyde_fn as make_llama_hyde_fn
 from .llama_predict import make_llama_predict_fn as make_llama_predict_fn
 from .llama_rerank import make_llama_rerank_fn as make_llama_rerank_fn
+from .llama_rewrite import make_llama_rewrite_fn as make_llama_rewrite_fn
 from .sqlite_store import make_sqlite_query as make_sqlite_query
 from .sqlite_vec_store import load_graph as load_graph
 from .sqlite_vec_store import make_executor as make_executor
