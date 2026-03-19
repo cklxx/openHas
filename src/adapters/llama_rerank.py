@@ -8,7 +8,6 @@ references, and multi-hop reasoning that vector search cannot.
 import httpx
 
 from src.domain_types.memory import MemoryNode
-from src.domain_types.ports import ExpandContextFn  # reuse protocol shape
 
 _SYSTEM = (
     "You are a memory relevance ranker. "
@@ -25,11 +24,11 @@ _SYSTEM = (
 def make_llama_rerank_fn(base_url: str):  # type: ignore[return]
     client = httpx.AsyncClient(base_url=base_url, timeout=60.0)
 
-    async def rerank(query_text: str, nodes: list[MemoryNode]) -> list[str]:
+    async def rerank(query: str, nodes: list[MemoryNode]) -> list[str]:
         if not nodes:
             return []
-        node_block = "\n".join(f"[{n.id}] {n.content}" for n in nodes)
-        prompt = f"Question: {query_text}\n\nMemory facts:\n{node_block}"
+        node_block = "\n".join(f"[{n.id}] {n.content[:150]}" for n in nodes)
+        prompt = f"Question: {query}\n\nMemory facts:\n{node_block}"
         r = await client.post("/v1/chat/completions", json={
             "messages": [
                 {"role": "system", "content": _SYSTEM},

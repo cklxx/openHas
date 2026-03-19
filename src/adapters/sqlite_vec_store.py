@@ -12,6 +12,7 @@ All factory functions close over (conn, user_id) — no user_id in Protocol sign
 import json
 import sqlite3
 import struct
+import time
 from typing import Any
 
 from src.domain_types.memory import (
@@ -27,6 +28,7 @@ from src.domain_types.ports import (
     HydrateFn,
     SearchFn,
     StoreNodeFn,
+    UpdateNodeFn,
 )
 from src.domain_types.result import Result
 
@@ -271,6 +273,81 @@ def make_executor(conn: sqlite3.Connection, user_id: str) -> ConsolidationExecut
         return ('ok', count)
 
     return execute  # type: ignore[return-value]
+
+
+def make_update_access_fn(conn: sqlite3.Connection, user_id: str) -> UpdateNodeFn:
+    """Return an UpdateNodeFn that increments access_count and sets last_accessed."""
+
+    async def update_access(ids: tuple[str, ...]) -> Result[None, NodeWriteError]:
+        if not ids:
+            return ('ok', None)
+        try:
+            now = time.time()
+            ph = ','.join('?' * len(ids))
+            conn.execute(
+                f"UPDATE nodes SET access_count = access_count + 1, last_accessed = ? "
+                f"WHERE id IN ({ph}) AND user_id = ?",
+                (now, *ids, user_id),
+            )
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            return ('err', NodeWriteError(code='WRITE_FAILED', detail=str(exc)))
+        return ('ok', None)
+
+    return update_access  # type: ignore[return-value]
+
+
+def make_store_expansion_fn(
+    conn: sqlite3.Connection, user_id: str
+):  # type: ignore[return]
+    """Return a function that stores expansion embeddings for a node.
+
+    Inserts each embedding into vec_index + vec_meta, then marks the node
+    expansion_state='expanded'. Returns Result[int, NodeWriteError] (count stored).
+    """
+
+    async def store_expansion(
+        node_id: str, embeddings: list[tuple[float, ...]]
+    ) -> Result[int, NodeWriteError]:
+        try:
+            count = 0
+            for emb in embeddings:
+                conn.execute(
+                    "INSERT INTO vec_index(embedding) VALUES (?)",
+                    (struct.pack(f'{len(emb)}f', *emb),),
+                )
+                conn.execute(
+                    "INSERT INTO vec_meta(rowid, node_id, user_id) "
+                    "VALUES (last_insert_rowid(), ?, ?)",
+                    (node_id, user_id),
+                )
+                count += 1
+            conn.execute(
+                "UPDATE nodes SET expansion_state = 'expanded' "
+                "WHERE id = ? AND user_id = ?",
+                (node_id, user_id),
+            )
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            return ('err', NodeWriteError(code='WRITE_FAILED', detail=str(exc)))
+        return ('ok', count)
+
+    return store_expansion
+
+
+def make_list_pending_fn(
+    conn: sqlite3.Connection, user_id: str
+):  # type: ignore[return]
+    """Return a function that lists nodes with expansion_state='pending'."""
+
+    async def list_pending() -> list[MemoryNode]:
+        rows = conn.execute(
+            "SELECT * FROM nodes WHERE expansion_state = 'pending' AND user_id = ?",
+            (user_id,),
+        ).fetchall()
+        return [_row_to_node(dict(r)) for r in rows]
+
+    return list_pending
 
 
 def load_graph(conn: sqlite3.Connection, user_id: str) -> MemoryGraph:
