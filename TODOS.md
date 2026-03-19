@@ -158,7 +158,7 @@ Decision: only do this if consolidation becomes a measurable bottleneck first.
 
 ---
 
-### [TODO-7] kind/label filter support in SearchFn
+### ~~[TODO-7] kind/label filter support in SearchFn~~ ✅
 
 **What:** Extend `SearchFn` protocol to accept optional `kinds: tuple[NodeKind, ...]` and
 `labels: tuple[str, ...]` parameters. Add `WHERE kind IN (...)` and label JSON filtering to
@@ -184,7 +184,7 @@ Python after resolving node_ids via vec_meta → nodes join.
 
 ---
 
-### [TODO-8] Adaptive blend weight tuning (_W_HYDE, _W_EXP, _W_DOC)
+### ~~[TODO-8] Adaptive blend weight tuning~~ ✅
 
 **What:** Track per-case recall success rates across blend configurations. Auto-tune
 `_W_HYDE`, `_W_EXP`, `_W_DOC` using eval feedback or online A/B testing.

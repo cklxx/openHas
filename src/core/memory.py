@@ -51,6 +51,7 @@ class RecallDeps:
     query_embed: EmbedFn
     hydrate: HydrateFn
     primary_search: SearchFn  # doc-side only — used by HyDE to avoid expansion contamination
+    hyde_weight: float = _W_HYDE
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
@@ -89,12 +90,12 @@ def _merge_scores(
 
 
 def _blend_scores(
-    base_map: dict[str, float], hyde_map: dict[str, float]
+    base_map: dict[str, float], hyde_map: dict[str, float], w_hyde: float
 ) -> dict[str, float]:
     all_nids = set(base_map) | set(hyde_map)
     return {
-        nid: base_map.get(nid, 0.0) * (1.0 - _W_HYDE)
-             + hyde_map.get(nid, 0.0) * _W_HYDE
+        nid: base_map.get(nid, 0.0) * (1.0 - w_hyde)
+             + hyde_map.get(nid, 0.0) * w_hyde
         for nid in all_nids
     }
 
@@ -115,8 +116,9 @@ def _blend_and_rank(
     base_hits: list[tuple[str, float]],
     hyde_map: dict[str, float],
     top_k: int,
+    w_hyde: float = _W_HYDE,
 ) -> tuple[list[str], dict[str, float]]:
-    blended = _blend_scores(dict(base_hits), hyde_map)
+    blended = _blend_scores(dict(base_hits), hyde_map, w_hyde)
     top = sorted(blended, key=blended.__getitem__, reverse=True)[:top_k]
     return top, blended
 
@@ -236,7 +238,7 @@ def make_hyde_recall(
             return ('err', RecallError(code='SEARCH_FAILED', detail=str(e)))
         snippets = await _safe_hyde_snippets(hyde_fn, query.text)
         hyde_map = await _compute_hyde_scores(doc_embed, deps.primary_search, snippets, query)
-        top_ids, blended = _blend_and_rank(base_hits, hyde_map, query.top_k)
+        top_ids, blended = _blend_and_rank(base_hits, hyde_map, query.top_k, deps.hyde_weight)
         hydrated = await deps.hydrate(tuple(top_ids))
         result = _build_result(hydrated, top_ids, blended)
         await _try_update_access(update_access, tuple(n.id for n in result.nodes))
