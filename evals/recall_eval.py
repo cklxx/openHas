@@ -345,6 +345,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Enable query rewriting to surface implicit knowledge")
     p.add_argument("--rebuild-expansion", action="store_true",
                    help="Regenerate expansion cache (default: reuse if exists)")
+    p.add_argument("--tune", action="store_true",
+                   help="Grid search _W_HYDE, report best weight per category")
     p.add_argument("--category", metavar="CAT",
                    help="Run only cases matching this category (see --list-categories)")
     p.add_argument("--list-categories", action="store_true",
@@ -432,7 +434,6 @@ class _BaseCtx:
 
 def _make_base(ctx: _BaseCtx, use_hyde: bool):  # type: ignore[return]
     if use_hyde:
-        print("HyDE enabled — generating hypothetical snippets at query time")
         hyde_fn = make_llama_hyde_fn(ctx.predict_url)
         return make_hyde_recall(ctx.deps, ctx.doc_embed, hyde_fn, ctx.update_access)
     return make_recall(
@@ -440,12 +441,15 @@ def _make_base(ctx: _BaseCtx, use_hyde: bool):  # type: ignore[return]
     )
 
 
-async def _build_recall(embed_url: str, predict_url: str, flags: _EvalFlags):  # type: ignore[return]
+async def _build_recall(
+    embed_url: str, predict_url: str, flags: _EvalFlags, hyde_weight: float = 0.15,
+):  # type: ignore[return]
     query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids = (
         await _setup_db(embed_url, predict_url)
     )
     deps = RecallDeps(  # type: ignore[arg-type]
-        search=search, query_embed=query_embed, hydrate=hydrate, primary_search=primary_search,
+        search=search, query_embed=query_embed, hydrate=hydrate,
+        primary_search=primary_search, hyde_weight=hyde_weight,
     )
     ctx = _BaseCtx(
         deps=deps, doc_embed=doc_embed,
@@ -453,16 +457,42 @@ async def _build_recall(embed_url: str, predict_url: str, flags: _EvalFlags):  #
     )
     recall = _make_base(ctx, flags.use_hyde)
     if flags.use_iterative:
-        print("Iterative retrieval enabled — two-round multi-hop search")
         recall = make_iterative_recall(recall, query_embed, search, hydrate)  # type: ignore[arg-type]
     if flags.use_rerank:
-        print("LLM reranker enabled — reasoning pass over wider candidate pool")
-        rerank = make_llama_rerank_fn(predict_url)
-        recall = make_reranked_recall(recall, rerank, hydrate, decayed_ids)  # type: ignore[arg-type]
+        recall = make_reranked_recall(
+            recall, make_llama_rerank_fn(predict_url), hydrate, decayed_ids,  # type: ignore[arg-type]
+        )
     if flags.use_rewrite:
-        print("Query rewriting enabled — making implicit knowledge explicit")
         recall = make_rewritten_recall(recall, make_llama_rewrite_fn(predict_url))  # type: ignore[arg-type]
     return recall
+
+
+_TUNE_GRID = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+
+
+def _mean_r1(rows: list[dict]) -> float:  # type: ignore[type-arg]
+    if not rows:
+        return 0.0
+    return sum(_recall_at(r["returned"], r["expected"], 1) for r in rows) / len(rows)
+
+
+async def _run_tune(embed_url: str, predict_url: str, cases_path: str, flags: _EvalFlags) -> None:
+    cases = _load_cases(cases_path)
+    if flags.category:
+        cases = [c for c in cases if c.get("category") == flags.category]
+    cases = [c for c in cases if not c.get("unanswerable")]
+    await asyncio.gather(_wait_ready(embed_url), _wait_ready(predict_url))
+    print(f"Tuning _W_HYDE over {_TUNE_GRID} ({len(cases)} cases)\n")
+    best_w, best_r1 = 0.15, 0.0
+    for w in _TUNE_GRID:
+        recall = await _build_recall(embed_url, predict_url, flags, hyde_weight=w)
+        rows = await _run_recall(recall, cases)
+        r1 = _mean_r1(rows)
+        marker = " ← best" if r1 > best_r1 else ""
+        print(f"  w={w:.2f}  R@1={r1:.3f}{marker}")
+        if r1 > best_r1:
+            best_w, best_r1 = w, r1
+    print(f"\nBest: _W_HYDE={best_w:.2f} (R@1={best_r1:.3f})")
 
 
 async def _run_eval(embed_url: str, predict_url: str, cases_path: str, flags: _EvalFlags) -> None:
@@ -490,10 +520,22 @@ def _flags_from_args(args: argparse.Namespace) -> _EvalFlags:
     )
 
 
-async def _run_with_servers(args: argparse.Namespace) -> None:
+def _maybe_clear_cache(args: argparse.Namespace) -> None:
     if args.rebuild_expansion and _EXPANSION_CACHE.exists():
         _EXPANSION_CACHE.unlink()
         print("Expansion cache cleared — will regenerate")
+
+
+async def _dispatch(args: argparse.Namespace, embed_url: str, predict_url: str) -> None:
+    flags = _flags_from_args(args)
+    if args.tune:
+        await _run_tune(embed_url, predict_url, args.cases, flags)
+    else:
+        await _run_eval(embed_url, predict_url, args.cases, flags)
+
+
+async def _run_with_servers(args: argparse.Namespace) -> None:
+    _maybe_clear_cache(args)
     embed_path = args.embed_model or hf_hub_download(_EMBED_REPO, _EMBED_FILE)
     predict_path = args.predict_model or hf_hub_download(_PREDICT_REPO, _PREDICT_FILE)
     embed_url, predict_url = f"http://localhost:{_EMBED_PORT}", f"http://localhost:{_PREDICT_PORT}"
@@ -501,7 +543,7 @@ async def _run_with_servers(args: argparse.Namespace) -> None:
     embed_proc = _start_server(embed_path, _EMBED_PORT, ["--embedding", "--pooling", "last"])
     predict_proc = _start_server(predict_path, _PREDICT_PORT, [])
     try:
-        await _run_eval(embed_url, predict_url, args.cases, _flags_from_args(args))
+        await _dispatch(args, embed_url, predict_url)
     finally:
         embed_proc.terminate()
         predict_proc.terminate()
