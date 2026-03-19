@@ -1,6 +1,10 @@
 # openHas — TODOS
 
-Deferred work from CEO review (2026-03-18, /plan-ceo-review, SELECTIVE EXPANSION mode).
+Deferred work from CEO review (2026-03-18 and 2026-03-19, /plan-ceo-review, SELECTIVE EXPANSION mode).
+
+> **2026-03-19 update:** TODO-1 completed. Eval now uses production `sqlite_vec_store` adapters,
+> expansion cache eliminates cross-run variance, and query rewriting bridges the vocabulary gap.
+> See `docs/designs/recall-pipeline.md` for the final design.
 
 ---
 
@@ -151,3 +155,79 @@ Decision: only do this if consolidation becomes a measurable bottleneck first.
 **Effort:** M (human: ~2 days / CC: ~20 min)
 **Priority:** P3
 **Depends on:** P0 consolidation executor working and proven stable
+
+---
+
+### [TODO-7] kind/label filter support in SearchFn
+
+**What:** Extend `SearchFn` protocol to accept optional `kinds: tuple[NodeKind, ...]` and
+`labels: tuple[str, ...]` parameters. Add `WHERE kind IN (...)` and label JSON filtering to
+`sqlite_vec_store.make_search_fn`. Wire through `make_recall`.
+
+**Why:** `MemoryQuery.kinds` and `MemoryQuery.labels` are silently dropped today — callers who
+pass them get unfiltered results with no error. This is a broken API contract.
+
+**Pros:** Enables structured recall (e.g. "only preferences", "only work-labeled facts").
+Reduces reranker input noise by pre-filtering irrelevant node kinds.
+
+**Cons:** `SearchFn` protocol signature change is a breaking change for all adapters and tests.
+Must update `tests/adapters/test_sqlite_vec_store.py` and any stub implementations.
+
+**Context:** `SearchFn` currently has signature `(embedding, top_k) -> list[(id, score)]`.
+New signature: `(embedding, top_k, kinds=(), labels=()) -> list[(id, score)]`.
+The sqlite-vec KNN query can't filter inline — fetch `top_k*2`, then filter by kind/label in
+Python after resolving node_ids via vec_meta → nodes join.
+
+**Effort:** S (human: ~4h / CC: ~10 min)
+**Priority:** P2
+**Depends on:** Core recall pipeline wiring complete
+
+---
+
+### [TODO-8] Adaptive blend weight tuning (_W_HYDE, _W_EXP, _W_DOC)
+
+**What:** Track per-case recall success rates across blend configurations. Auto-tune
+`_W_HYDE`, `_W_EXP`, `_W_DOC` using eval feedback or online A/B testing.
+
+**Why:** Current weights (W_HYDE=0.15, W_EXP=0.30, W_DOC=0.70) were tuned on a 32-node eval
+corpus. As the real corpus grows and query distribution shifts, these weights will drift from
+optimal. Manual re-tuning requires running the full eval after every corpus change.
+
+**Pros:** Self-optimizing recall quality. Weights adapt to the user's actual query patterns.
+
+**Cons:** Adds complexity to the eval loop. Requires sufficient query volume to converge.
+Premature at current scale.
+
+**Context:** Weights live as module-level constants in `core/memory.py`. A simple grid search
+over `_W_HYDE ∈ [0.1, 0.2, 0.3]` on the eval benchmark would already find a better setting
+than the current hand-tuned value. The online version requires logging which blend setting
+produced the accepted recall result — tracked via `access_count` updates.
+
+**Effort:** L (human: ~3 days / CC: ~30 min)
+**Priority:** P3
+**Depends on:** access_count update live + meaningful query volume (>500 queries)
+
+---
+
+### [TODO-9] Streaming recall (return base hits immediately, upgrade when reranker finishes)
+
+**What:** Return `RecallResult` from base KNN immediately (< 100ms), then emit an updated
+result when the reranker pass completes (~1-2s later). Requires an async streaming protocol.
+
+**Why:** With all stages enabled, recall latency is ~2s. For interactive use (chat assistant,
+autocomplete), 2s is too slow. Streaming returns useful results in 60ms and silently upgrades.
+
+**Pros:** Perceived latency drops from ~2s to ~60ms for the first result. Real-time UX.
+No accuracy tradeoff — the final result is still fully reranked.
+
+**Cons:** Requires a streaming `RecallResult` type (e.g. `AsyncGenerator`). Caller must handle
+two emissions. Complicates CLI output (would need to overwrite the printed list).
+
+**Context:** This becomes relevant when openHas is used as a service (TODO-3: FastAPI entrypoint)
+rather than a CLI tool. The streaming protocol should be modeled as
+`AsyncGenerator[RecallResult, None]` — first yield is base KNN, second yield is reranked.
+The existing `make_*` factory pattern can be extended: `make_streaming_recall(...)`.
+
+**Effort:** L (human: ~2 days / CC: ~20 min)
+**Priority:** P2 (when FastAPI entrypoint exists)
+**Depends on:** TODO-3 (FastAPI entrypoint)
