@@ -245,6 +245,7 @@ class _EvalFlags:
     use_hyde: bool
     use_iterative: bool
     use_rerank: bool
+    category: str | None = None
 
 
 def _print_row(row: dict) -> tuple[float, ...]:  # type: ignore[type-arg]
@@ -322,6 +323,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Disable multi-hop iterative retrieval (faster, lower recall)")
     p.add_argument("--no-rerank", action="store_true",
                    help="Disable LLM reranker (faster, lower recall on cue/referential/multi-hop)")
+    p.add_argument("--category", metavar="CAT",
+                   help="Run only cases matching this category (e.g. cue_trigger, multi_hop)")
     return p.parse_args()
 
 
@@ -400,6 +403,9 @@ async def _build_recall(embed_url: str, predict_url: str, flags: _EvalFlags):  #
 
 async def _run_eval(embed_url: str, predict_url: str, cases_path: str, flags: _EvalFlags) -> None:
     cases = _load_cases(cases_path)
+    if flags.category:
+        cases = [c for c in cases if c.get("category") == flags.category]
+        print(f"Category filter: {flags.category!r} → {len(cases)} cases")
     non_adversarial = sum(1 for c in cases if not c.get("unanswerable"))
     ku_filter = sum(1 for c in cases if c.get("forbidden_ids"))
     print(f"Loaded {len(cases)} cases ({non_adversarial} scored, "
@@ -423,6 +429,7 @@ async def main() -> None:
         use_hyde=not args.no_hyde,
         use_iterative=not args.no_iterative,
         use_rerank=not args.no_rerank,
+        category=args.category,
     )
     try:
         await _run_eval(embed_url, predict_url, args.cases, flags)
