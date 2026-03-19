@@ -12,8 +12,12 @@ from src.domain_types.ports import ExpandContextFn
 _SYSTEM = (
     "Given a personal memory fact, output 5 queries where knowing THIS specific fact "
     "is essential to answer correctly. "
-    "Each query must be unanswerable without the exact content of this fact. "
-    "Avoid generic questions about personality, preferences, or lifestyle in general. "
+    "Include both direct questions and indirect scenario queries — real situations "
+    "where this fact determines the correct answer, even if the query does not "
+    "mention the fact directly (e.g. a food restriction applies to specific "
+    "ingredients; a schedule determines when someone is available). "
+    "Each query must be unanswerable without this fact. "
+    "Avoid generic questions about the person's life. "
     "Mix Chinese and English. One query per line. No numbering, no explanation."
 )
 
