@@ -12,6 +12,7 @@ from src.domain_types.memory import ConsolidationAction, MemoryNode
 _DECAYED_SCORE_MAX = 0.2
 _CORPUS_SIZE = 3
 _MISSING_EXCLUDED = 2
+_EXPANSION_COUNT = 3
 
 _EMBED_URL = "http://localhost:18080"
 
@@ -148,6 +149,57 @@ async def test_store_and_search_top_k_larger_than_corpus(tmp_path) -> None:  # t
         ))
     hits = await make_search_fn(conn, 'u')((1.0,) + (0.0,) * 1023, 100)
     assert len(hits) == _CORPUS_SIZE
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_store_expansion_creates_multiple_vec_rows(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from src.adapters.sqlite_vec_store import (
+        make_store_expansion_fn,
+        make_store_fn,
+        open_db,
+    )
+
+    conn = open_db(str(tmp_path / "test.db"))
+    await make_store_fn(conn, 'u')(_make_node('n1', (0.1,) * 1024))
+    store_expansion = make_store_expansion_fn(conn, 'u')
+    result = await store_expansion('n1', [(0.2,) * 1024, (0.3,) * 1024, (0.4,) * 1024])
+    assert result[0] == 'ok' and result[1] == _EXPANSION_COUNT
+    rows = conn.execute(
+        "SELECT count(*) as c FROM vec_meta WHERE node_id = 'n1' AND user_id = 'u'"
+    ).fetchone()
+    assert rows['c'] >= _EXPANSION_COUNT
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_update_access_increments_count(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from src.adapters.sqlite_vec_store import (
+        make_store_fn,
+        make_update_access_fn,
+        open_db,
+    )
+
+    conn = open_db(str(tmp_path / "test.db"))
+    await make_store_fn(conn, 'u')(_make_node('n1', (0.1,) * 1024))
+    update_access = make_update_access_fn(conn, 'u')
+    result = await update_access(('n1',))
+    assert result[0] == 'ok'
+    row = conn.execute(
+        "SELECT access_count FROM nodes WHERE id = 'n1' AND user_id = 'u'"
+    ).fetchone()
+    assert row['access_count'] == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_update_access_empty_ids_is_noop(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from src.adapters.sqlite_vec_store import make_update_access_fn, open_db
+
+    conn = open_db(str(tmp_path / "test.db"))
+    update_access = make_update_access_fn(conn, 'u')
+    result = await update_access(())
+    assert result[0] == 'ok'
 
 
 def test_open_db_without_sqlite_vec_raises() -> None:

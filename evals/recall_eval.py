@@ -21,28 +21,40 @@ import subprocess
 import sys
 import time
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import httpx
-import numpy as np
 from huggingface_hub import hf_hub_download
 from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
 from src.adapters.llama_expand import make_llama_expand_fn
 from src.adapters.llama_hyde import make_llama_hyde_fn
 from src.adapters.llama_rerank import make_llama_rerank_fn
+from src.adapters.sqlite_vec_store import (
+    make_hydrate_fn,
+    make_search_fn,
+    make_store_expansion_fn,
+    make_store_fn,
+    make_update_access_fn,
+    open_db,
+)
 from src.core.consolidation import consolidate
-from src.core.memory import RecallError, make_recall
+from src.core.memory import (
+    RecallDeps,
+    make_hyde_recall,
+    make_iterative_recall,
+    make_recall,
+    make_reranked_recall,
+)
 from src.domain_types.memory import (
     Edge,
     MemoryGraph,
     MemoryNode,
     MemoryQuery,
     QueryDistribution,
-    RecallResult,
 )
-from src.domain_types.ports import EmbedFn, ExpandContextFn, HydrateFn, SearchFn
 
 # ── Model registry ─────────────────────────────────────────────────────────
 
@@ -172,201 +184,6 @@ async def _wait_ready(url: str, timeout: float = 120.0) -> None:
             await asyncio.sleep(1.0)
     raise TimeoutError(f"{url} not ready after {timeout:.0f}s")
 
-# ── Numpy cosine search ─────────────────────────────────────────────────────
-
-def _build_normed(embs: list[tuple[float, ...]]) -> "np.ndarray":  # type: ignore[type-arg]
-    m = np.array(embs, dtype=np.float32)
-    return m / (np.linalg.norm(m, axis=1, keepdims=True) + 1e-8)  # type: ignore[return-value]
-
-
-_DocIndex = tuple[list[str], "np.ndarray"]  # type: ignore[type-arg]
-
-# Blend weights: doc (query-emb ↔ doc-normed) > exp (context expansions) > hyde (hypothetical)
-# w_doc + w_exp must sum to 1.0 for the base search; _W_HYDE is applied as a post-blend.
-_W_DOC, _W_EXP = 0.70, 0.30
-_W_HYDE = 0.15   # HyDE contribution: final = base * (1 - _W_HYDE) + hyde * _W_HYDE
-_DECAY_FACTOR = 0.1
-
-
-def _make_search_fn(
-    doc_index: _DocIndex, exp_index: _DocIndex, decayed_ids: frozenset[str]
-) -> SearchFn:
-    doc_ids, doc_normed = doc_index
-    exp_ids, exp_normed = exp_index
-
-    async def search(embedding: tuple[float, ...], top_k: int) -> list[tuple[str, float]]:
-        q = np.array(embedding, dtype=np.float32)
-        q /= np.linalg.norm(q) + 1e-8
-        doc_scores = {doc_ids[i]: float(s) for i, s in enumerate(doc_normed @ q)}
-        exp_raw = exp_normed @ q
-        exp_best: dict[str, float] = {}
-        for i, nid in enumerate(exp_ids):
-            s = float(exp_raw[int(i)])
-            if s > exp_best.get(nid, -1.0):
-                exp_best[nid] = s
-        raw = {
-            nid: doc_scores.get(nid, 0.0) * _W_DOC + exp_best.get(nid, 0.0) * _W_EXP
-            for nid in set(doc_scores) | set(exp_best)
-        }
-        blended = {
-            nid: (score * _DECAY_FACTOR if nid in decayed_ids else score)
-            for nid, score in raw.items()
-        }
-        return sorted(blended.items(), key=lambda x: x[1], reverse=True)[:top_k]
-
-    return search
-
-
-# ── HyDE recall ──────────────────────────────────────────────────────────────
-#
-# HyDE (Hypothetical Document Embedding):
-#   query text ──▶ LLM ──▶ hypothetical memory snippets
-#                            ──▶ doc-side embed ──▶ cosine sim vs doc_normed
-#                                                    ──▶ hyde_scores
-#   final = base_score * (1 - W_HYDE) + hyde_score * W_HYDE
-#
-async def _compute_hyde_scores(
-    query_text: str,
-    hyde_fn: ExpandContextFn,
-    doc_embed: EmbedFn,
-    doc_ids: list[str],
-    doc_normed: "np.ndarray",  # type: ignore[type-arg]
-    decayed_ids: frozenset[str],
-) -> dict[str, float]:
-    """Compute per-node HyDE scores for a query. Returns {} on any failure."""
-    try:
-        snippets = await hyde_fn(query_text)
-    except Exception:
-        return {}
-    result: dict[str, float] = {}
-    for snippet in snippets:
-        try:
-            s_emb = await doc_embed(snippet)
-            q_vec = np.array(s_emb, dtype=np.float32)
-            q_vec /= np.linalg.norm(q_vec) + 1e-8
-            scores = doc_normed @ q_vec
-            for i, nid in enumerate(doc_ids):
-                score = float(scores[i])
-                if nid in decayed_ids:
-                    score *= _DECAY_FACTOR
-                if score > result.get(nid, -1.0):
-                    result[nid] = score
-        except Exception:
-            continue
-    return result
-
-
-def _make_hyde_recall(
-    base_search: SearchFn,
-    query_embed: EmbedFn,
-    doc_embed: EmbedFn,
-    hydrate: HydrateFn,
-    hyde_fn: ExpandContextFn,
-    doc_ids: list[str],
-    doc_normed: "np.ndarray",  # type: ignore[type-arg]
-    decayed_ids: frozenset[str],
-):  # type: ignore[return]
-    """Wrap base search with HyDE: blend base + hypothetical-snippet scores."""
-    async def recall(query: MemoryQuery):  # type: ignore[return]
-        if not query.text.strip():
-            return ('err', RecallError(code='EMPTY_QUERY'))
-        try:
-            q_emb = await query_embed(query.text)
-            base_hits = await base_search(q_emb, query.top_k)
-        except Exception as e:
-            return ('err', RecallError(code='SEARCH_FAILED', detail=str(e)))
-        base_map: dict[str, float] = dict(base_hits)
-        hyde_map = await _compute_hyde_scores(
-            query.text, hyde_fn, doc_embed, doc_ids, doc_normed, decayed_ids
-        )
-        all_nids = set(base_map) | set(hyde_map)
-        blended = {
-            nid: base_map.get(nid, 0.0) * (1.0 - _W_HYDE)
-                 + hyde_map.get(nid, 0.0) * _W_HYDE
-            for nid in all_nids
-        }
-        top_pairs = sorted(blended.items(), key=lambda x: x[1], reverse=True)[:query.top_k]
-        hydrated = await hydrate(tuple(nid for nid, _ in top_pairs))
-        pairs = [(hydrated[nid], blended[nid]) for nid, _ in top_pairs if nid in hydrated]
-        return ('ok', RecallResult(
-            nodes=tuple(n for n, _ in pairs),
-            scores=tuple(s for _, s in pairs),
-        ))
-    return recall
-
-
-# ── Multi-hop iterative recall ────────────────────────────────────────────────
-#
-# Round 1: search with original query embedding
-# Round 2: re-embed (query_text + top-3 node content), search again
-# Merge:   max score per node across both rounds
-#
-def _make_iterative_recall(base_recall, query_embed: EmbedFn, search: SearchFn, hydrate: HydrateFn):  # type: ignore[return]
-    """Wrap a recall fn with one additional search round using context from round-1 hits."""
-    async def iterative_recall(query: MemoryQuery):  # type: ignore[return]
-        r1 = await base_recall(query)
-        if r1[0] == 'err' or not r1[1].nodes:
-            return r1
-        ctx = ' '.join(n.content for n in r1[1].nodes[:3])
-        try:
-            r2_emb = await query_embed(f"{query.text} {ctx}")
-            r2_hits = await search(r2_emb, query.top_k)
-        except Exception:
-            return r1
-        r1_map: dict[str, float] = dict(zip((n.id for n in r1[1].nodes), r1[1].scores))
-        r2_map: dict[str, float] = dict(r2_hits)
-        merged = {
-            nid: max(r1_map.get(nid, 0.0), r2_map.get(nid, 0.0))
-            for nid in set(r1_map) | set(r2_map)
-        }
-        top_pairs = sorted(merged.items(), key=lambda x: x[1], reverse=True)[:query.top_k]
-        hydrated = await hydrate(tuple(nid for nid, _ in top_pairs))
-        pairs = [(hydrated[nid], merged[nid]) for nid, _ in top_pairs if nid in hydrated]
-        return ('ok', RecallResult(
-            nodes=tuple(n for n, _ in pairs),
-            scores=tuple(s for _, s in pairs),
-        ))
-    return iterative_recall
-
-
-# ── LLM reranker ─────────────────────────────────────────────────────────────
-#
-# Fetches top-k * _RERANK_FETCH_FACTOR candidates, then asks the LLM to rank
-# them by true relevance — handles cue_trigger, referential, multi_hop.
-#
-_RERANK_FETCH_FACTOR = 3  # fetch 15 when top_k=5
-
-
-def _make_reranked_recall(  # type: ignore[return]
-    base_recall, rerank_fn, hydrate: HydrateFn, decayed_ids: frozenset[str]
-):
-    """Wrap a recall fn with an LLM reranking pass over a wider candidate pool.
-
-    Decayed (superseded) nodes are stripped before the LLM sees them so the
-    reranker cannot accidentally promote stale facts that vector decay suppressed.
-    """
-    async def reranked_recall(query: MemoryQuery):  # type: ignore[return]
-        wide_query = MemoryQuery(text=query.text, top_k=query.top_k * _RERANK_FETCH_FACTOR)
-        r = await base_recall(wide_query)
-        if r[0] == 'err' or not r[1].nodes:
-            return r
-        candidates = [n for n in r[1].nodes if n.id not in decayed_ids]
-        if not candidates:
-            return r
-        try:
-            ranked_ids = await rerank_fn(query.text, candidates)
-        except Exception:
-            return r
-        hydrated = await hydrate(tuple(ranked_ids[:query.top_k]))
-        top_ids = [nid for nid in ranked_ids[:query.top_k] if nid in hydrated]
-        score_map = dict(zip((n.id for n in r[1].nodes), r[1].scores))
-        return ('ok', RecallResult(
-            nodes=tuple(hydrated[nid] for nid in top_ids),
-            scores=tuple(score_map.get(nid, 0.0) for nid in top_ids),
-        ))
-    return reranked_recall
-
-
 # ── Metrics ─────────────────────────────────────────────────────────────────
 
 def _recall_at(returned: list[str], expected: set[str], k: int) -> float:
@@ -421,20 +238,26 @@ def _pad(s: str, width: int) -> str:
     return s + ' ' * max(width - _dw(s), 0)
 
 
-def _print_row(
-    query_text: str, expected: set[str], returned: list[str], forbidden: set[str],
-    elapsed: float,
-) -> tuple[float, ...]:
-    r1, r3, r5 = (_recall_at(returned, expected, k) for k in (1, 3, 5))
-    rr = _mrr(returned, expected)
+@dataclass(frozen=True, slots=True)
+class _EvalFlags:
+    use_hyde: bool
+    use_iterative: bool
+    use_rerank: bool
+
+
+def _print_row(row: dict) -> tuple[float, ...]:  # type: ignore[type-arg]
+    q, ret, exp = row["query"], row["returned"], row["expected"]
+    forb, t = row["forbidden"], row["elapsed"]
+    r1, r3, r5 = (_recall_at(ret, exp, k) for k in (1, 3, 5))
+    rr = _mrr(ret, exp)
     mark = "✓" if r1 else "✗"
-    print(f"  {mark} {_pad(query_text, 48)}  {r1:.0f}    {r3:.0f}    {r5:.0f}  {rr:.3f}  {elapsed:.1f}s")
+    print(f"  {mark} {_pad(q, 48)}  {r1:.0f} {r3:.0f} {r5:.0f}  {rr:.3f}  {t:.1f}s")
     if not r1:
-        first_hit = next((r for r in returned if r in expected), "—")
-        print(f"      got: {returned[:3]}  first hit: {first_hit}")
-    ar5 = _anti_recall_at(returned, forbidden, 5) if forbidden else -1.0
-    if forbidden and not ar5:
-        print(f"      anti-R@5 FAIL  forbidden appeared: {sorted(set(returned[:5]) & forbidden)}")
+        first_hit = next((r for r in ret if r in exp), "—")
+        print(f"      got: {ret[:3]}  first hit: {first_hit}")
+    ar5 = _anti_recall_at(ret, forb, 5) if forb else -1.0
+    if forb and not ar5:
+        print(f"      anti-R@5 FAIL  forbidden: {sorted(set(ret[:5]) & forb)}")
     return r1, r3, r5, rr, ar5
 
 
@@ -458,9 +281,7 @@ def _print_category_report(rows: list[dict]) -> None:  # type: ignore[type-arg]
 
 def _accumulate_row(row: dict, totals: list[float]) -> int:  # type: ignore[type-arg]
     """Print one row and accumulate its metrics; returns 1 if AR@5 was tracked."""
-    r1, r3, r5, rr, ar5 = _print_row(
-        row["query"], row["expected"], row["returned"], row["forbidden"], row["elapsed"]
-    )
+    r1, r3, r5, rr, ar5 = _print_row(row)
     for i, v in enumerate((r1, r3, r5, rr)):
         totals[i] += v
     if ar5 >= 0.0:
@@ -479,7 +300,8 @@ def _print_recall_report(rows: list[dict]) -> None:  # type: ignore[type-arg]
     t1, t3, t5, tmrr = (totals[i] / n for i in range(4))
     ar5_str = f"  AR@5={totals[4] / n_ar:.2f}" if n_ar else ""
     avg_time = sum(r["elapsed"] for r in rows) / n
-    print(f"{sep}\n  {'MEAN':<50}  {t1:.2f}  {t3:.2f}  {t5:.2f}  {tmrr:.3f}{ar5_str}  {avg_time:.1f}s")
+    mean = f"  {'MEAN':<50}  {t1:.2f}  {t3:.2f}  {t5:.2f}  {tmrr:.3f}{ar5_str}  {avg_time:.1f}s"
+    print(f"{sep}\n{mean}")
     _print_category_report(rows)
 
 # ── Entry point ─────────────────────────────────────────────────────────────
@@ -501,83 +323,84 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-async def _embed_corpus(
-    doc_embed, query_embed, expand  # type: ignore[type-arg]
-) -> tuple[list[str], list[tuple[float, ...]], list[str], list[tuple[float, ...]]]:
-    doc_ids: list[str] = []
-    doc_embs: list[tuple[float, ...]] = []
-    exp_ids: list[str] = []
-    exp_embs: list[tuple[float, ...]] = []
-    print(f"Expanding contexts for {len(_CORPUS)} memories …")
-    for nid, text in _CORPUS:
-        doc_ids.append(nid)
-        doc_embs.append(await doc_embed(text))
-        for ctx in await expand(text):
-            exp_ids.append(nid)
-            exp_embs.append(await query_embed(ctx))
-    return doc_ids, doc_embs, exp_ids, exp_embs
+def _compute_decayed_ids(graph: MemoryGraph) -> frozenset[str]:
+    consolidation = consolidate(graph, time.time(), QueryDistribution())
+    if consolidation[0] != 'ok':
+        return frozenset()
+    return frozenset(
+        nid
+        for action in consolidation[1].actions
+        if action.action in ('decay', 'supersede', 'remove')
+        for nid in action.node_ids
+    )
 
 
-async def _build_index(  # type: ignore[return]
-    embed_url: str, predict_url: str, use_hyde: bool, use_iterative: bool, use_rerank: bool
-):
+async def _store_corpus(conn: object, embed_url: str, predict_url: str) -> None:
+    """Embed all corpus nodes + store expansion embeddings into DB."""
     doc_embed = make_doc_embed_fn(embed_url)
     query_embed = make_query_embed_fn(embed_url)
-    expand = make_llama_expand_fn(predict_url)
-    doc_ids, doc_embs, exp_ids, exp_embs = await _embed_corpus(doc_embed, query_embed, expand)
+    expand_fn = make_llama_expand_fn(predict_url)
+    store_fn = make_store_fn(conn, 'eval')  # type: ignore[arg-type]
+    store_expansion = make_store_expansion_fn(conn, 'eval')  # type: ignore[arg-type]
+    node_map = {n.id: n for n in _build_memory_graph().nodes}
+    print(f"Embedding + expanding {len(_CORPUS)} corpus nodes …")
+    for nid, text in _CORPUS:
+        n = node_map[nid]
+        emb = await doc_embed(text)
+        await store_fn(MemoryNode(
+            id=n.id, kind=n.kind, content=n.content,
+            event_time=n.event_time, record_time=n.record_time,
+            last_accessed=n.last_accessed, permanence=n.permanence, embedding=emb,
+        ))
+        exp_embs = await asyncio.gather(*[query_embed(q) for q in await expand_fn(text)])
+        await store_expansion(nid, list(exp_embs))
+
+
+async def _setup_db(embed_url: str, predict_url: str) -> tuple[object, ...]:
+    """Store corpus into in-memory sqlite-vec DB; return factories + decayed_ids."""
+    conn = open_db(':memory:')
+    await _store_corpus(conn, embed_url, predict_url)
     graph = _build_memory_graph()
-    consolidation = consolidate(graph, time.time(), QueryDistribution())
-    decayed_ids: frozenset[str] = frozenset()
-    if consolidation[0] == 'ok':
-        decayed_ids = frozenset(
-            nid
-            for action in consolidation[1].actions
-            if action.action in ('decay', 'supersede', 'remove')
-            for nid in action.node_ids
-        )
-    doc_normed = _build_normed(doc_embs)
-    search = _make_search_fn(
-        (doc_ids, doc_normed),
-        (exp_ids, _build_normed(exp_embs)),
-        decayed_ids,
+    decayed_ids = _compute_decayed_ids(graph)
+    search = make_search_fn(conn, 'eval')
+    hydrate = make_hydrate_fn(conn, 'eval')
+    update_access = make_update_access_fn(conn, 'eval')
+    query_embed = make_query_embed_fn(embed_url)
+    doc_embed = make_doc_embed_fn(embed_url)
+    return query_embed, doc_embed, search, hydrate, update_access, decayed_ids
+
+
+async def _build_recall(embed_url: str, predict_url: str, flags: _EvalFlags):  # type: ignore[return]
+    query_embed, doc_embed, search, hydrate, update_access, decayed_ids = (
+        await _setup_db(embed_url, predict_url)
     )
-    node_lookup = {n.id: n for n in graph.nodes}
-
-    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
-        return {i: node_lookup[i] for i in ids if i in node_lookup}
-
-    if use_hyde:
+    deps = RecallDeps(search=search, query_embed=query_embed, hydrate=hydrate)  # type: ignore[arg-type]
+    if flags.use_hyde:
         print("HyDE enabled — generating hypothetical snippets at query time")
-        recall = _make_hyde_recall(
-            search, query_embed, doc_embed, hydrate,
-            make_llama_hyde_fn(predict_url),
-            doc_ids, doc_normed, decayed_ids,
+        recall = make_hyde_recall(
+            deps, doc_embed, make_llama_hyde_fn(predict_url), update_access  # type: ignore[arg-type]
         )
     else:
-        recall = make_recall(search, query_embed, hydrate)  # type: ignore[arg-type]
-
-    if use_iterative:
+        recall = make_recall(search, query_embed, hydrate, update_access)  # type: ignore[arg-type]
+    if flags.use_iterative:
         print("Iterative retrieval enabled — two-round multi-hop search")
-        recall = _make_iterative_recall(recall, query_embed, search, hydrate)
-
-    if use_rerank:
+        recall = make_iterative_recall(recall, query_embed, search, hydrate)  # type: ignore[arg-type]
+    if flags.use_rerank:
         print("LLM reranker enabled — reasoning pass over wider candidate pool")
-        recall = _make_reranked_recall(recall, make_llama_rerank_fn(predict_url), hydrate, decayed_ids)
-
+        recall = make_reranked_recall(
+            recall, make_llama_rerank_fn(predict_url), hydrate, decayed_ids  # type: ignore[arg-type]
+        )
     return recall
 
 
-async def _run_eval(
-    embed_url: str, predict_url: str, cases_path: str,
-    use_hyde: bool, use_iterative: bool, use_rerank: bool
-) -> None:
+async def _run_eval(embed_url: str, predict_url: str, cases_path: str, flags: _EvalFlags) -> None:
     cases = _load_cases(cases_path)
     non_adversarial = sum(1 for c in cases if not c.get("unanswerable"))
     ku_filter = sum(1 for c in cases if c.get("forbidden_ids"))
     print(f"Loaded {len(cases)} cases ({non_adversarial} scored, "
           f"{len(cases) - non_adversarial} adversarial, {ku_filter} ku_filter)")
     await asyncio.gather(_wait_ready(embed_url), _wait_ready(predict_url))
-    recall = await _build_index(embed_url, predict_url, use_hyde, use_iterative, use_rerank)
+    recall = await _build_recall(embed_url, predict_url, flags)
     rows = await _run_recall(recall, cases)
     _print_recall_report(rows)
 
@@ -591,10 +414,13 @@ async def main() -> None:
     print("Starting embed + predict servers …")
     embed_proc = _start_server(embed_path, _EMBED_PORT, ["--embedding", "--pooling", "last"])
     predict_proc = _start_server(predict_path, _PREDICT_PORT, [])
+    flags = _EvalFlags(
+        use_hyde=not args.no_hyde,
+        use_iterative=not args.no_iterative,
+        use_rerank=not args.no_rerank,
+    )
     try:
-        await _run_eval(embed_url, predict_url, args.cases,
-                        use_hyde=not args.no_hyde, use_iterative=not args.no_iterative,
-                        use_rerank=not args.no_rerank)
+        await _run_eval(embed_url, predict_url, args.cases, flags)
     finally:
         embed_proc.terminate()
         predict_proc.terminate()

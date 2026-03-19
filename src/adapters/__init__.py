@@ -3,12 +3,15 @@ from .llama_embed import make_doc_embed_fn as make_doc_embed_fn
 from .llama_embed import make_query_embed_fn as make_query_embed_fn
 from .llama_expand import make_llama_expand_fn as make_llama_expand_fn
 from .llama_hyde import make_llama_hyde_fn as make_llama_hyde_fn
-from .llama_rerank import make_llama_rerank_fn as make_llama_rerank_fn
 from .llama_predict import make_llama_predict_fn as make_llama_predict_fn
+from .llama_rerank import make_llama_rerank_fn as make_llama_rerank_fn
 from .sqlite_store import make_sqlite_query as make_sqlite_query
 from .sqlite_vec_store import load_graph as load_graph
 from .sqlite_vec_store import make_executor as make_executor
 from .sqlite_vec_store import make_hydrate_fn as make_hydrate_fn
+from .sqlite_vec_store import make_list_pending_fn as make_list_pending_fn
 from .sqlite_vec_store import make_search_fn as make_search_fn
+from .sqlite_vec_store import make_store_expansion_fn as make_store_expansion_fn
 from .sqlite_vec_store import make_store_fn as make_store_fn
+from .sqlite_vec_store import make_update_access_fn as make_update_access_fn
 from .sqlite_vec_store import open_db as open_db

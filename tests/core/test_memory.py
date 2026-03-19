@@ -1,9 +1,18 @@
 """Tests for memory store & recall — using Protocol stubs, no mock.patch."""
 
+import asyncio
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from src.core.memory import make_recall, make_store_memory
+from src.core.memory import (
+    RecallDeps,
+    make_hyde_recall,
+    make_iterative_recall,
+    make_recall,
+    make_reranked_recall,
+    make_store_memory,
+)
 from src.domain_types.memory import MemoryNode, MemoryQuery
 
 _EXPECTED_HIT_COUNT = 2
@@ -178,3 +187,109 @@ async def test_scores_length_always_matches_nodes(n: int) -> None:
         MemoryQuery(text='q')
     )
     assert result[0] == 'ok' and len(result[1].nodes) == len(result[1].scores)
+
+
+@pytest.mark.asyncio
+async def test_hyde_recall_timeout_falls_back_to_base() -> None:
+    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+        return [('n1', 0.9)]
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    async def slow_hyde(text: str) -> list[str]:
+        await asyncio.sleep(100)
+        return []
+
+    deps = RecallDeps(search=search, query_embed=_stub_embed, hydrate=hydrate)  # type: ignore[arg-type]
+    recall = make_hyde_recall(deps, _stub_embed, slow_hyde)  # type: ignore[arg-type]
+    result = await recall(MemoryQuery(text='q', top_k=1))
+    assert result[0] == 'ok' and len(result[1].nodes) == 1
+
+
+@pytest.mark.asyncio
+async def test_hyde_recall_empty_snippets_returns_base() -> None:
+    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+        return [('n1', 0.9)]
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    async def empty_hyde(text: str) -> list[str]:
+        return []
+
+    deps = RecallDeps(search=search, query_embed=_stub_embed, hydrate=hydrate)  # type: ignore[arg-type]
+    recall = make_hyde_recall(deps, _stub_embed, empty_hyde)  # type: ignore[arg-type]
+    result = await recall(MemoryQuery(text='q', top_k=1))
+    assert result[0] == 'ok' and result[1].nodes[0].id == 'n1'
+
+
+@pytest.mark.asyncio
+async def test_reranked_recall_all_decayed_returns_base() -> None:
+    async def base_recall(query: MemoryQuery):  # type: ignore[return]
+        return ('ok', type('R', (), {
+            'nodes': (_make_node('n1'),),
+            'scores': (0.9,),
+        })())
+
+    async def rerank(query: str, nodes: list) -> list[str]:
+        return [n.id for n in nodes]
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    recall = make_reranked_recall(base_recall, rerank, hydrate, frozenset({'n1'}))  # type: ignore[arg-type]
+    result = await recall(MemoryQuery(text='q', top_k=1))
+    assert result[0] == 'ok'
+    assert result[1].nodes[0].id == 'n1'
+
+
+@pytest.mark.asyncio
+async def test_iterative_recall_r1_empty_returns_r1() -> None:
+    async def base_recall(query: MemoryQuery):  # type: ignore[return]
+        return ('ok', type('R', (), {'nodes': (), 'scores': ()})())
+
+    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+        return [('n1', 0.9)]
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    recall = make_iterative_recall(base_recall, _stub_embed, search, hydrate)  # type: ignore[arg-type]
+    result = await recall(MemoryQuery(text='q'))
+    assert result[0] == 'ok' and result[1].nodes == ()
+
+
+@pytest.mark.asyncio
+async def test_recall_updates_access_count() -> None:
+    updated: list[tuple[str, ...]] = []
+
+    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+        return [('n1', 0.9)]
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    async def update_access(ids: tuple[str, ...]):  # type: ignore[return]
+        updated.append(ids)
+        return ('ok', None)
+
+    recall = make_recall(search, _stub_embed, hydrate, update_access)  # type: ignore[arg-type]
+    await recall(MemoryQuery(text='q'))
+    assert updated == [('n1',)]
+
+
+@pytest.mark.asyncio
+async def test_recall_access_update_failure_does_not_fail_recall() -> None:
+    async def search(e: tuple[float, ...], k: int) -> list[tuple[str, float]]:
+        return [('n1', 0.9)]
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    async def bad_update(ids: tuple[str, ...]):  # type: ignore[return]
+        raise RuntimeError("db down")
+
+    recall = make_recall(search, _stub_embed, hydrate, bad_update)  # type: ignore[arg-type]
+    result = await recall(MemoryQuery(text='q'))
+    assert result[0] == 'ok'

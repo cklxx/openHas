@@ -63,3 +63,16 @@ class ExpandContextFn(Protocol):
     and added to the search index alongside the raw doc embedding.
     """
     async def __call__(self, memory_text: str) -> list[str]: ...
+
+
+class RerankFn(Protocol):
+    """Re-rank candidate MemoryNodes by relevance to a query text.
+
+    Returns node IDs in ranked order, most relevant first.
+    """
+    async def __call__(self, query: str, nodes: list[MemoryNode]) -> list[str]: ...
+
+
+class UpdateNodeFn(Protocol):
+    """Increment access_count + update last_accessed for recalled node IDs."""
+    async def __call__(self, ids: tuple[str, ...]) -> Result[None, NodeWriteError]: ...

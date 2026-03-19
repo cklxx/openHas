@@ -22,6 +22,8 @@ from .ports import HydrateFn as HydrateFn
 from .ports import NowFn as NowFn
 from .ports import PredictQueryFn as PredictQueryFn
 from .ports import QueryFn as QueryFn
+from .ports import RerankFn as RerankFn
 from .ports import SearchFn as SearchFn
 from .ports import StoreNodeFn as StoreNodeFn
+from .ports import UpdateNodeFn as UpdateNodeFn
 from .result import Result as Result
