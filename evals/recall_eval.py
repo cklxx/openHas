@@ -309,6 +309,18 @@ def _print_recall_report(rows: list[dict]) -> None:  # type: ignore[type-arg]
 
 # ── Entry point ─────────────────────────────────────────────────────────────
 
+def _print_categories(cases_path: str) -> None:
+    cases = _load_cases(cases_path)
+    counts: dict[str, int] = {}
+    for c in cases:
+        cat = c.get("category", "")
+        if cat:
+            counts[cat] = counts.get(cat, 0) + 1
+    print("Available categories:")
+    for cat in sorted(counts, key=counts.__getitem__, reverse=True):
+        print(f"  {cat:<20} {counts[cat]} cases")
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Recall quality evaluation")
     p.add_argument("--embed-model", metavar="PATH",
@@ -324,7 +336,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-rerank", action="store_true",
                    help="Disable LLM reranker (faster, lower recall on cue/referential/multi-hop)")
     p.add_argument("--category", metavar="CAT",
-                   help="Run only cases matching this category (e.g. cue_trigger, multi_hop)")
+                   help="Run only cases matching this category (see --list-categories)")
+    p.add_argument("--list-categories", action="store_true",
+                   help="Print available categories with case counts, then exit")
     return p.parse_args()
 
 
@@ -416,26 +430,35 @@ async def _run_eval(embed_url: str, predict_url: str, cases_path: str, flags: _E
     _print_recall_report(rows)
 
 
-async def main() -> None:
-    args = _parse_args()
-    embed_path = args.embed_model or hf_hub_download(_EMBED_REPO, _EMBED_FILE)
-    predict_path = args.predict_model or hf_hub_download(_PREDICT_REPO, _PREDICT_FILE)
-    embed_url = f"http://localhost:{_EMBED_PORT}"
-    predict_url = f"http://localhost:{_PREDICT_PORT}"
-    print("Starting embed + predict servers …")
-    embed_proc = _start_server(embed_path, _EMBED_PORT, ["--embedding", "--pooling", "last"])
-    predict_proc = _start_server(predict_path, _PREDICT_PORT, [])
-    flags = _EvalFlags(
+def _flags_from_args(args: argparse.Namespace) -> _EvalFlags:
+    return _EvalFlags(
         use_hyde=not args.no_hyde,
         use_iterative=not args.no_iterative,
         use_rerank=not args.no_rerank,
         category=args.category,
     )
+
+
+async def _run_with_servers(args: argparse.Namespace) -> None:
+    embed_path = args.embed_model or hf_hub_download(_EMBED_REPO, _EMBED_FILE)
+    predict_path = args.predict_model or hf_hub_download(_PREDICT_REPO, _PREDICT_FILE)
+    embed_url, predict_url = f"http://localhost:{_EMBED_PORT}", f"http://localhost:{_PREDICT_PORT}"
+    print("Starting embed + predict servers …")
+    embed_proc = _start_server(embed_path, _EMBED_PORT, ["--embedding", "--pooling", "last"])
+    predict_proc = _start_server(predict_path, _PREDICT_PORT, [])
     try:
-        await _run_eval(embed_url, predict_url, args.cases, flags)
+        await _run_eval(embed_url, predict_url, args.cases, _flags_from_args(args))
     finally:
         embed_proc.terminate()
         predict_proc.terminate()
+
+
+async def main() -> None:
+    args = _parse_args()
+    if args.list_categories:
+        _print_categories(args.cases)
+        return
+    await _run_with_servers(args)
 
 
 if __name__ == "__main__":
