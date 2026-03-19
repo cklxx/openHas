@@ -14,6 +14,7 @@ from src.adapters.sqlite_vec_store import (
     load_graph,
     make_hydrate_fn,
     make_list_pending_fn,
+    make_primary_search_fn,
     make_search_fn,
     make_store_expansion_fn,
     make_store_fn,
@@ -96,6 +97,7 @@ def _build_recall_stack(
         search=make_search_fn(conn, args.user),
         query_embed=make_query_embed_fn(args.embed_url),
         hydrate=make_hydrate_fn(conn, args.user),
+        primary_search=make_primary_search_fn(conn, args.user),
     )
     update_access = make_update_access_fn(conn, args.user)
     if args.hyde:

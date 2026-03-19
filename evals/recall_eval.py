@@ -34,6 +34,7 @@ from src.adapters.llama_hyde import make_llama_hyde_fn
 from src.adapters.llama_rerank import make_llama_rerank_fn
 from src.adapters.sqlite_vec_store import (
     make_hydrate_fn,
+    make_primary_search_fn,
     make_search_fn,
     make_store_expansion_fn,
     make_store_fn,
@@ -136,13 +137,14 @@ _CORPUS_EDGES: list[tuple[str, str]] = [
 
 
 def _build_memory_graph() -> MemoryGraph:
+    now = time.time()
     nodes = tuple(
         MemoryNode(
             id=nid, kind='fact', content=text,
-            event_time=float(i), record_time=float(i), last_accessed=float(i),
+            event_time=now, record_time=now, last_accessed=now,
             permanence=_CORPUS_PERMANENCE.get(nid, 'unknown'),  # type: ignore[arg-type]
         )
-        for i, (nid, text) in enumerate(_CORPUS, start=1)
+        for nid, text in _CORPUS
     )
     edges = tuple(
         Edge(source_id=src, target_id=tgt, kind='supersedes')
@@ -363,18 +365,21 @@ async def _setup_db(embed_url: str, predict_url: str) -> tuple[object, ...]:
     graph = _build_memory_graph()
     decayed_ids = _compute_decayed_ids(graph)
     search = make_search_fn(conn, 'eval')
+    primary_search = make_primary_search_fn(conn, 'eval')
     hydrate = make_hydrate_fn(conn, 'eval')
     update_access = make_update_access_fn(conn, 'eval')
     query_embed = make_query_embed_fn(embed_url)
     doc_embed = make_doc_embed_fn(embed_url)
-    return query_embed, doc_embed, search, hydrate, update_access, decayed_ids
+    return query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids
 
 
 async def _build_recall(embed_url: str, predict_url: str, flags: _EvalFlags):  # type: ignore[return]
-    query_embed, doc_embed, search, hydrate, update_access, decayed_ids = (
+    query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids = (
         await _setup_db(embed_url, predict_url)
     )
-    deps = RecallDeps(search=search, query_embed=query_embed, hydrate=hydrate)  # type: ignore[arg-type]
+    deps = RecallDeps(  # type: ignore[arg-type]
+        search=search, query_embed=query_embed, hydrate=hydrate, primary_search=primary_search,
+    )
     if flags.use_hyde:
         print("HyDE enabled — generating hypothetical snippets at query time")
         recall = make_hyde_recall(

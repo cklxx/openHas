@@ -10,6 +10,7 @@ from .sqlite_vec_store import load_graph as load_graph
 from .sqlite_vec_store import make_executor as make_executor
 from .sqlite_vec_store import make_hydrate_fn as make_hydrate_fn
 from .sqlite_vec_store import make_list_pending_fn as make_list_pending_fn
+from .sqlite_vec_store import make_primary_search_fn as make_primary_search_fn
 from .sqlite_vec_store import make_search_fn as make_search_fn
 from .sqlite_vec_store import make_store_expansion_fn as make_store_expansion_fn
 from .sqlite_vec_store import make_store_fn as make_store_fn
