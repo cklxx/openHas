@@ -32,7 +32,7 @@ def make_llama_expand_fn(base_url: str) -> ExpandContextFn:
                 {"role": "user", "content": memory_text},
             ],
             "max_tokens": 256,
-            "temperature": 0.7,
+            "temperature": 0.3,
         })
         text: str = r.json()["choices"][0]["message"]["content"]
         return [ln.strip() for ln in text.splitlines() if ln.strip()]
