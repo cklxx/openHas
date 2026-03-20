@@ -195,7 +195,7 @@ flag runs grid search with index-once optimization.
 
 ---
 
-### [TODO-9] Streaming recall (return base hits immediately, upgrade when reranker finishes)
+### ~~[TODO-9] Streaming recall (return base hits immediately, upgrade when reranker finishes)~~ ✅
 
 **What:** Return `RecallResult` from base KNN immediately (< 100ms), then emit an updated
 result when the reranker pass completes (~1-2s later). Requires an async streaming protocol.
