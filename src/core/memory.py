@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -302,6 +302,60 @@ def make_reranked_recall(
         return ('ok', _build_result(hydrated, ranked_ids[:query.top_k], score_map))
 
     return recall
+
+
+_StreamResult = AsyncGenerator[Result[RecallResult, RecallError], None]
+
+
+@dataclass(frozen=True, slots=True)
+class RerankDeps:
+    """Bundled dependencies for the reranking phase."""
+    rerank_fn: RerankFn
+    hydrate: HydrateFn
+    decayed_ids: frozenset[str]
+
+
+def make_streaming_recall(
+    base_recall: _RecallFn, deps: RerankDeps,
+):
+    """Yield base results immediately, then upgraded reranked results.
+
+    First yield: top_k from base recall (fast KNN + HyDE + iterative).
+    Second yield (if different): reranked top_k from wider candidate pool.
+    """
+
+    async def recall(query: MemoryQuery) -> _StreamResult:
+        wide = MemoryQuery(text=query.text, top_k=query.top_k * _RERANK_FETCH_FACTOR)
+        r = await base_recall(wide)
+        if r[0] == 'err':
+            yield r  # type: ignore[misc]
+            return
+        initial = RecallResult(
+            nodes=r[1].nodes[:query.top_k],
+            scores=r[1].scores[:query.top_k],
+        )
+        yield ('ok', initial)
+        upgraded = await _rerank_phase(r, deps, query)
+        if upgraded is not None and upgraded.nodes != initial.nodes:
+            yield ('ok', upgraded)
+
+    return recall
+
+
+async def _rerank_phase(
+    r: object, deps: RerankDeps, query: MemoryQuery,
+) -> RecallResult | None:
+    candidates = _get_candidates(r, deps.decayed_ids)
+    if not candidates:
+        return None
+    ranked_ids = await _safe_rerank(deps.rerank_fn, query.text, candidates)
+    if ranked_ids is None:
+        return None
+    hydrated = await deps.hydrate(tuple(ranked_ids[:query.top_k]))
+    score_map: dict[str, float] = dict(zip(
+        (n.id for n in r[1].nodes), r[1].scores, strict=False  # type: ignore[index]
+    ))
+    return _build_result(hydrated, ranked_ids[:query.top_k], score_map)
 
 
 def make_rewritten_recall(

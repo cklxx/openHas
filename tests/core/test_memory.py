@@ -7,17 +7,20 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from src.core.memory import (
     RecallDeps,
+    RerankDeps,
     make_hyde_recall,
     make_iterative_recall,
     make_recall,
     make_reranked_recall,
     make_rewritten_recall,
     make_store_memory,
+    make_streaming_recall,
 )
-from src.domain_types.memory import MemoryNode, MemoryQuery
+from src.domain_types.memory import MemoryNode, MemoryQuery, RecallResult
 
 _EXPECTED_HIT_COUNT = 2
 _NODES_AFTER_MISSING = 2
+_STREAMING_INITIAL_PLUS_UPGRADED = 2
 
 
 async def _noop_store(node: MemoryNode):  # type: ignore[return]
@@ -353,3 +356,75 @@ async def test_recall_passes_kinds_and_labels_to_search() -> None:
     await recall(MemoryQuery(text='q', kinds=('fact',), labels=('work',)))
     assert seen_kinds == [('fact',)]
     assert seen_labels == [('work',)]
+
+
+# ── Streaming recall tests ──────────────────────────────────────────────────
+
+
+def _streaming_deps(rerank_order: list[str] | None = None) -> RerankDeps:
+    async def rerank(query: str, nodes: list) -> list[str]:
+        if rerank_order is not None:
+            return rerank_order
+        return [n.id for n in nodes]
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    return RerankDeps(rerank_fn=rerank, hydrate=hydrate, decayed_ids=frozenset())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_streaming_yields_initial_then_reranked() -> None:
+    async def base(query: MemoryQuery):  # type: ignore[return]
+        nodes = tuple(_make_node(f"n{i}") for i in range(3))
+        return ('ok', RecallResult(nodes=nodes, scores=(0.9, 0.7, 0.5)))
+
+    deps = _streaming_deps(rerank_order=['n2', 'n0', 'n1'])
+    gen = make_streaming_recall(base, deps)
+    results = [r async for r in gen(MemoryQuery(text='q', top_k=2))]
+    assert len(results) == _STREAMING_INITIAL_PLUS_UPGRADED
+    assert results[0][1].nodes[0].id == 'n0'
+    assert results[1][1].nodes[0].id == 'n2'
+
+
+@pytest.mark.asyncio
+async def test_streaming_single_yield_when_order_unchanged() -> None:
+    async def base(query: MemoryQuery):  # type: ignore[return]
+        nodes = tuple(_make_node(f"n{i}") for i in range(3))
+        return ('ok', RecallResult(nodes=nodes, scores=(0.9, 0.7, 0.5)))
+
+    deps = _streaming_deps(rerank_order=['n0', 'n1', 'n2'])
+    gen = make_streaming_recall(base, deps)
+    results = [r async for r in gen(MemoryQuery(text='q', top_k=2))]
+    assert len(results) == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_yields_error_once() -> None:
+    async def bad_base(query: MemoryQuery):  # type: ignore[return]
+        return ('err', type('E', (), {'code': 'SEARCH_FAILED', 'detail': ''})())
+
+    deps = _streaming_deps()
+    gen = make_streaming_recall(bad_base, deps)
+    results = [r async for r in gen(MemoryQuery(text='q'))]
+    assert len(results) == 1
+    assert results[0][0] == 'err'
+
+
+@pytest.mark.asyncio
+async def test_streaming_reranker_timeout_yields_only_initial() -> None:
+    async def base(query: MemoryQuery):  # type: ignore[return]
+        return ('ok', RecallResult(nodes=(_make_node('n1'),), scores=(0.9,)))
+
+    async def slow_rerank(query: str, nodes: list) -> list[str]:
+        await asyncio.sleep(60)
+        return []
+
+    async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
+        return {i: _make_node(i) for i in ids}
+
+    deps = RerankDeps(rerank_fn=slow_rerank, hydrate=hydrate, decayed_ids=frozenset())  # type: ignore[arg-type]
+    gen = make_streaming_recall(base, deps)
+    results = [r async for r in gen(MemoryQuery(text='q', top_k=1))]
+    assert len(results) == 1
+    assert results[0][0] == 'ok'
