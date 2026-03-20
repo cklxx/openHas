@@ -10,7 +10,7 @@ Deferred work from CEO review (2026-03-18 and 2026-03-19, /plan-ceo-review, SELE
 
 ## P1 — Must do soon
 
-### [TODO-1] Eval-production adapter convergence
+### ~~[TODO-1] Eval-production adapter convergence~~ ✅
 
 **What:** Update `evals/recall_eval.py` to use the same `sqlite_vec_store` adapter as the
 production path, replacing the custom in-memory numpy index.
@@ -186,26 +186,12 @@ Python after resolving node_ids via vec_meta → nodes join.
 
 ### ~~[TODO-8] Adaptive blend weight tuning~~ ✅
 
-**What:** Track per-case recall success rates across blend configurations. Auto-tune
-`_W_HYDE`, `_W_EXP`, `_W_DOC` using eval feedback or online A/B testing.
+**Done:** Grid search over `_W_HYDE ∈ [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]` on 142-case
+eval benchmark. Result: `_W_HYDE=0.25` (R@1=0.606) beats previous default 0.15 (R@1=0.570).
 
-**Why:** Current weights (W_HYDE=0.15, W_EXP=0.30, W_DOC=0.70) were tuned on a 32-node eval
-corpus. As the real corpus grows and query distribution shifts, these weights will drift from
-optimal. Manual re-tuning requires running the full eval after every corpus change.
-
-**Pros:** Self-optimizing recall quality. Weights adapt to the user's actual query patterns.
-
-**Cons:** Adds complexity to the eval loop. Requires sufficient query volume to converge.
-Premature at current scale.
-
-**Context:** Weights live as module-level constants in `core/memory.py`. A simple grid search
-over `_W_HYDE ∈ [0.1, 0.2, 0.3]` on the eval benchmark would already find a better setting
-than the current hand-tuned value. The online version requires logging which blend setting
-produced the accepted recall result — tracked via `access_count` updates.
-
-**Effort:** L (human: ~3 days / CC: ~30 min)
-**Priority:** P3
-**Depends on:** access_count update live + meaningful query volume (>500 queries)
+`_W_EXP / _W_DOC` removed — reverted to MAX scoring per node. Only `_W_HYDE` remains as a
+tunable blend weight. `RecallDeps.hyde_weight` allows per-instance override. Eval `--tune`
+flag runs grid search with index-once optimization.
 
 ---
 
