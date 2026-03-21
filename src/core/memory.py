@@ -8,8 +8,13 @@ from typing import Literal
 
 from src.domain_types.memory import MemoryNode, MemoryQuery, RecallResult
 from src.domain_types.ports import (
+    BM25SearchFn,
+    DecayMapFn,
+    DecomposeFn,
     EmbedFn,
     ExpandContextFn,
+    GapCheckFn,
+    GraphSearchFn,
     HydrateFn,
     NowFn,
     RerankFn,
@@ -27,6 +32,8 @@ _RERANK_FETCH_FACTOR = 5
 _HYDE_TIMEOUT = 5.0
 _RERANK_TIMEOUT = 30.0
 _REWRITE_TIMEOUT = 10.0
+_DECOMPOSE_TIMEOUT = 10.0
+_GAP_CHECK_TIMEOUT = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,5 +380,224 @@ def make_rewritten_recall(
             logger.warning("Rewrite fallback (non-fatal): %s", exc)
             rewritten = query.text
         return await base_recall(MemoryQuery(text=rewritten, top_k=query.top_k))
+
+    return recall
+
+
+def make_decomposed_recall(
+    base_recall: _RecallFn,
+    decompose_fn: DecomposeFn,
+    hydrate: HydrateFn,
+):
+    """Wrap a recall fn with query decomposition for multi-constraint queries.
+
+    Decomposes the query into sub-queries, runs base recall on each in parallel,
+    then merges results by max score per node. This widens the candidate pool
+    so the reranker can see constraints from different domains.
+    """
+
+    async def recall(query: MemoryQuery) -> Result[RecallResult, RecallError]:
+        try:
+            subs = await asyncio.wait_for(
+                decompose_fn(query.text), _DECOMPOSE_TIMEOUT
+            )
+        except Exception as exc:
+            logger.warning("Decompose fallback (non-fatal): %s", exc)
+            return await base_recall(query)
+        if len(subs) <= 1:
+            return await base_recall(query)
+        sub_queries = [MemoryQuery(text=s, top_k=query.top_k) for s in subs]
+        results = await asyncio.gather(
+            base_recall(query),
+            *[base_recall(sq) for sq in sub_queries],
+        )
+        merged: dict[str, float] = {}
+        for r in results:
+            if r[0] == 'err' or not r[1].nodes:
+                continue
+            for node, score in zip(r[1].nodes, r[1].scores):
+                if score > merged.get(node.id, -1.0):
+                    merged[node.id] = score
+        if not merged:
+            return await base_recall(query)
+        top_ids = sorted(merged, key=merged.__getitem__, reverse=True)[:query.top_k]
+        hydrated = await hydrate(tuple(top_ids))
+        return ('ok', _build_result(hydrated, top_ids, merged))
+
+    return recall
+
+
+_RRF_K = 60  # standard from Cormack et al. 2009
+_TEMPORAL_DECAY_DEFAULT = 0.0001  # per-second decay factor for temporal re-score
+
+
+def _rrf_fuse(
+    channels: list[list[tuple[str, float]]], k: int = _RRF_K,
+) -> dict[str, float]:
+    """Reciprocal Rank Fusion across multiple ranked lists."""
+    scores: dict[str, float] = {}
+    for channel in channels:
+        for rank, (nid, _score) in enumerate(channel):
+            scores[nid] = scores.get(nid, 0.0) + 1.0 / (k + rank + 1)
+    return scores
+
+
+def _temporal_score(
+    node: MemoryNode, now: float, decay: float = _TEMPORAL_DECAY_DEFAULT,
+) -> float:
+    """Time-aware boost: recent + frequently-accessed nodes score higher."""
+    age = max(now - node.last_accessed, 0.0)
+    recency = 1.0 / (1.0 + decay * age)
+    frequency = 1.0 + 0.1 * min(node.access_count, 10)
+    return recency * frequency
+
+
+@dataclass(frozen=True, slots=True)
+class HybridDeps:
+    """Bundled IO dependencies for hybrid multi-channel recall."""
+    dense_search: SearchFn
+    bm25_search: BM25SearchFn
+    graph_search: GraphSearchFn
+    embed: EmbedFn
+    hydrate: HydrateFn
+    decay_map_fn: DecayMapFn
+
+
+@dataclass(frozen=True, slots=True)
+class HybridConfig:
+    use_bm25: bool
+    use_graph: bool
+    use_temporal: bool
+    temporal_decay: float
+
+
+async def _empty() -> list[tuple[str, float]]:
+    return []
+
+
+async def _collect_channels(
+    deps: HybridDeps, cfg: HybridConfig,
+    q_emb: tuple[float, ...], query: MemoryQuery, fetch_k: int,
+) -> list[list[tuple[str, float]]]:
+    """Run CH1 + CH2 parallel, CH3 sequential; return ranked lists."""
+    ch1_coro = deps.dense_search(q_emb, fetch_k, query.kinds, query.labels)
+    ch2_coro = deps.bm25_search(query.text, fetch_k) if cfg.use_bm25 else _empty()
+    ch1_hits, ch2_hits = await asyncio.gather(ch1_coro, ch2_coro)
+    channels: list[list[tuple[str, float]]] = [ch1_hits]
+    if cfg.use_bm25 and ch2_hits:
+        channels.append(ch2_hits)
+    if cfg.use_graph:
+        ch3_hits = await _safe_graph(deps, tuple(nid for nid, _ in ch1_hits[:10]))
+        if ch3_hits:
+            channels.append(ch3_hits)
+    return channels
+
+
+async def _safe_graph(
+    deps: HybridDeps, seed_ids: tuple[str, ...],
+) -> list[tuple[str, float]]:
+    try:
+        return await deps.graph_search(seed_ids)
+    except Exception:
+        return []
+
+
+def _apply_temporal(
+    fused: dict[str, float], hydrated: dict[str, MemoryNode],
+    decay_map: dict[str, float], now: float, decay: float,
+) -> dict[str, float]:
+    """Return new score dict with temporal boost + decay factor applied."""
+    result = dict(fused)
+    for nid, node in hydrated.items():
+        if nid in result:
+            result[nid] *= _temporal_score(node, now, decay)
+            result[nid] *= decay_map.get(nid, 1.0)
+    return result
+
+
+async def _hybrid_core(
+    deps: HybridDeps, cfg: HybridConfig,
+    now_fn: NowFn, query: MemoryQuery,
+) -> Result[RecallResult, RecallError]:
+    """Core hybrid pipeline: channels → RRF → temporal → result."""
+    fetch_k = query.top_k * _RERANK_FETCH_FACTOR
+    try:
+        q_emb = await deps.embed(query.text)
+        channels = await _collect_channels(deps, cfg, q_emb, query, fetch_k)
+    except Exception as e:
+        return ('err', RecallError(code='SEARCH_FAILED', detail=str(e)))
+    fused = _rrf_fuse(channels)
+    if not fused:
+        return ('ok', RecallResult(nodes=(), scores=()))
+    hydrated = await deps.hydrate(tuple(fused.keys()))
+    if cfg.use_temporal:
+        decay_map = deps.decay_map_fn(list(hydrated.keys()))
+        fused = _apply_temporal(fused, hydrated, decay_map, now_fn(), cfg.temporal_decay)
+    final = sorted(fused, key=fused.__getitem__, reverse=True)[:query.top_k]
+    return ('ok', _build_result(hydrated, final, fused))
+
+
+def make_hybrid_recall(
+    deps: HybridDeps, now_fn: NowFn,
+    cfg: HybridConfig | None = None,
+):  # type: ignore[return]
+    """Multi-channel recall: dense + BM25 + graph → RRF → temporal re-score."""
+    effective = cfg or HybridConfig(True, True, True, _TEMPORAL_DECAY_DEFAULT)
+
+    async def recall(query: MemoryQuery) -> Result[RecallResult, RecallError]:
+        if not query.text.strip():
+            return ('err', RecallError(code='EMPTY_QUERY'))
+        return await _hybrid_core(deps, effective, now_fn, query)
+
+    return recall
+
+
+def make_gap_filled_recall(
+    base_recall: _RecallFn,
+    gap_check_fn: GapCheckFn,
+    query_embed: EmbedFn,
+    search: SearchFn,
+    hydrate: HydrateFn,
+):
+    """Wrap a recall fn with evidence-gap detection and filling.
+
+    After base recall, the LLM checks whether all query constraints are covered.
+    If gaps exist, targeted sub-queries retrieve missing facts and merge them in.
+    Inspired by MemR³ (arxiv:2512.20237) evidence-gap tracking.
+    """
+
+    async def recall(query: MemoryQuery) -> Result[RecallResult, RecallError]:
+        r1 = await base_recall(query)
+        if r1[0] == 'err' or not r1[1].nodes:
+            return r1  # type: ignore[return-value]
+        facts = [n.content for n in r1[1].nodes]
+        try:
+            gap_queries = await asyncio.wait_for(
+                gap_check_fn(query.text, facts), _GAP_CHECK_TIMEOUT
+            )
+        except Exception as exc:
+            logger.warning("Gap check fallback (non-fatal): %s", exc)
+            return r1  # type: ignore[return-value]
+        if not gap_queries:
+            return r1  # type: ignore[return-value]
+        r1_map = dict(zip(
+            (n.id for n in r1[1].nodes), r1[1].scores, strict=False
+        ))
+        gap_hits: list[list[tuple[str, float]]] = []
+        for gq in gap_queries:
+            try:
+                emb = await query_embed(gq)
+                hits = await search(emb, query.top_k, query.kinds, query.labels)
+                gap_hits.append(hits)
+            except Exception:
+                continue
+        merged = dict(r1_map)
+        for hits in gap_hits:
+            for nid, score in hits:
+                if score > merged.get(nid, -1.0):
+                    merged[nid] = score
+        top_ids = sorted(merged, key=merged.__getitem__, reverse=True)[:query.top_k]
+        hydrated = await hydrate(tuple(top_ids))
+        return ('ok', _build_result(hydrated, top_ids, merged))
 
     return recall

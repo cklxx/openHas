@@ -24,7 +24,9 @@ from src.domain_types.memory import (
     NodeWriteError,
 )
 from src.domain_types.ports import (
+    BM25SearchFn,
     ConsolidationExecutorFn,
+    GraphSearchFn,
     HydrateFn,
     SearchFn,
     StoreNodeFn,
@@ -74,6 +76,12 @@ CREATE TABLE IF NOT EXISTS vec_meta (
 );
 CREATE INDEX IF NOT EXISTS idx_vec_meta_user ON vec_meta(user_id, node_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(embedding float[{dim}]);
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+    content,
+    id UNINDEXED,
+    user_id UNINDEXED,
+    tokenize='unicode61'
+);
 """
 
 
@@ -90,8 +98,22 @@ def open_db(db_path: str, dim: int = 1024) -> sqlite3.Connection:
     conn.enable_load_extension(False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_schema(dim))
+    _backfill_fts5(conn)
     conn.commit()
     return conn
+
+
+def _backfill_fts5(conn: sqlite3.Connection) -> None:
+    """Insert nodes into FTS5 that are missing from nodes_fts. Skips if empty."""
+    if not conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone():
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO nodes_fts(content, id, user_id) "
+        "SELECT n.content, n.id, n.user_id FROM nodes n "
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 FROM nodes_fts f WHERE f.id = n.id AND f.user_id = n.user_id"
+        ")"
+    )
 
 
 # ── Row helpers ──────────────────────────────────────────────────────────────
@@ -218,6 +240,10 @@ def make_store_fn(conn: sqlite3.Connection, user_id: str) -> StoreNodeFn:
                     "VALUES (last_insert_rowid(), ?, ?)",
                     (node.id, user_id),
                 )
+            conn.execute(
+                "INSERT OR REPLACE INTO nodes_fts(content, id, user_id) VALUES (?, ?, ?)",
+                (node.content, node.id, user_id),
+            )
             conn.commit()
         except sqlite3.OperationalError as exc:
             return ('err', NodeWriteError(code='WRITE_FAILED', detail=str(exc)))
@@ -402,6 +428,81 @@ def make_list_pending_fn(
         return [_row_to_node(dict(r)) for r in rows]
 
     return list_pending
+
+
+def _sanitize_fts5(query: str) -> str:
+    """Wrap each token in double quotes for safe FTS5 querying."""
+    tokens = query.split()
+    return ' '.join(f'"{t}"' for t in tokens if t.strip())
+
+
+def make_bm25_search_fn(conn: sqlite3.Connection, user_id: str) -> BM25SearchFn:
+    """Return a BM25SearchFn scoped to user_id via FTS5."""
+
+    async def bm25_search(query_text: str, top_k: int) -> list[tuple[str, float]]:
+        sanitized = _sanitize_fts5(query_text)
+        if not sanitized:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT id, rank FROM nodes_fts "
+                "WHERE nodes_fts MATCH ? AND user_id = ? "
+                "ORDER BY rank LIMIT ?",
+                (sanitized, user_id, top_k),
+            ).fetchall()
+        except Exception:
+            return []
+        return [(str(r['id']), -float(r['rank'])) for r in rows]
+
+    return bm25_search  # type: ignore[return-value]
+
+
+_EDGE_WEIGHT: dict[str, float] = {  # keys match EdgeKind values
+    'supersedes': 1.0,
+    'contradicts': 0.8,
+    'causes': 0.6,
+    'part_of': 0.5,
+    'related': 0.3,
+}
+
+
+def make_graph_search_fn(conn: sqlite3.Connection, user_id: str) -> GraphSearchFn:
+    """Return a GraphSearchFn that does 1-hop BFS from seed IDs via edges."""
+
+    async def graph_search(seed_ids: tuple[str, ...]) -> list[tuple[str, float]]:
+        if not seed_ids:
+            return []
+        ph = ','.join('?' * len(seed_ids))
+        rows = conn.execute(
+            f"SELECT target_id, kind FROM edges "
+            f"WHERE source_id IN ({ph}) AND user_id = ? "
+            f"UNION "
+            f"SELECT source_id, kind FROM edges "
+            f"WHERE target_id IN ({ph}) AND user_id = ?",
+            (*seed_ids, user_id, *seed_ids, user_id),
+        ).fetchall()
+        scores: dict[str, float] = {}
+        seed_set = set(seed_ids)
+        for r in rows:
+            nid = str(r[0])
+            if nid in seed_set:
+                continue
+            w = _EDGE_WEIGHT.get(str(r[1]), 0.3)
+            _best(scores, nid, w)
+        return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+    return graph_search  # type: ignore[return-value]
+
+
+def make_decay_map_fn(
+    conn: sqlite3.Connection, user_id: str
+):  # type: ignore[return]
+    """Return a DecayMapFn scoped to user_id."""
+
+    def get_decay_map(node_ids: list[str]) -> dict[str, float]:
+        return _decay_map(conn, node_ids, user_id)
+
+    return get_decay_map
 
 
 def load_graph(conn: sqlite3.Connection, user_id: str) -> MemoryGraph:
