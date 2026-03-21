@@ -31,6 +31,7 @@ from huggingface_hub import hf_hub_download
 from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
 from src.adapters.llama_expand import make_llama_expand_fn
 from src.adapters.llama_hyde import make_llama_hyde_fn
+from src.adapters.cross_encoder_rerank import make_cross_encoder_rerank_fn
 from src.adapters.llama_rerank import make_llama_rerank_fn
 from src.adapters.llama_rewrite import make_llama_rewrite_fn
 from src.adapters.sqlite_vec_store import (
@@ -245,6 +246,9 @@ def _pad(s: str, width: int) -> str:
 _EXPANSION_CACHE = Path(__file__).parent / "expansion_cache.json"
 
 
+_DEFAULT_CE_MODEL = Path(__file__).parent / "reranker_model"
+
+
 @dataclass(frozen=True, slots=True)
 class _EvalFlags:
     use_hyde: bool
@@ -252,6 +256,7 @@ class _EvalFlags:
     use_rerank: bool
     use_rewrite: bool
     category: str | None = None
+    cross_encoder_path: str | None = None
 
 
 def _print_row(row: dict) -> tuple[float, ...]:  # type: ignore[type-arg]
@@ -351,6 +356,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Run only cases matching this category (see --list-categories)")
     p.add_argument("--list-categories", action="store_true",
                    help="Print available categories with case counts, then exit")
+    p.add_argument("--cross-encoder", metavar="PATH", nargs="?",
+                   const=str(_DEFAULT_CE_MODEL),
+                   help="Use cross-encoder reranker instead of LLM (default: evals/reranker_model/)")
     return p.parse_args()
 
 
@@ -459,8 +467,12 @@ def _build_from_db(
     if flags.use_iterative:
         recall = make_iterative_recall(recall, query_embed, search, hydrate)
     if flags.use_rerank:
+        if flags.cross_encoder_path:
+            rerank_fn = make_cross_encoder_rerank_fn(flags.cross_encoder_path)
+        else:
+            rerank_fn = make_llama_rerank_fn(predict_url)
         recall = make_reranked_recall(
-            recall, make_llama_rerank_fn(predict_url), hydrate, decayed_ids,
+            recall, rerank_fn, hydrate, decayed_ids,
         )
     if flags.use_rewrite:
         recall = make_rewritten_recall(recall, make_llama_rewrite_fn(predict_url))
@@ -530,6 +542,7 @@ def _flags_from_args(args: argparse.Namespace) -> _EvalFlags:
         use_rerank=not args.no_rerank,
         use_rewrite=args.rewrite,
         category=args.category,
+        cross_encoder_path=getattr(args, 'cross_encoder', None),
     )
 
 
