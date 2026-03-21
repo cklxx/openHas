@@ -13,11 +13,14 @@ from .memory import Permanence as Permanence
 from .memory import QueryDistribution as QueryDistribution
 from .memory import RecallResult as RecallResult
 from .memory import WriteDecision as WriteDecision
+from .ports import BM25SearchFn as BM25SearchFn
 from .ports import ClassifyFn as ClassifyFn
 from .ports import ConsolidationExecutorFn as ConsolidationExecutorFn
+from .ports import DecayMapFn as DecayMapFn
 from .ports import EmbedFn as EmbedFn
 from .ports import EmitFn as EmitFn
 from .ports import ExpandContextFn as ExpandContextFn
+from .ports import GraphSearchFn as GraphSearchFn
 from .ports import HydrateFn as HydrateFn
 from .ports import NowFn as NowFn
 from .ports import PredictQueryFn as PredictQueryFn

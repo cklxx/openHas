@@ -79,6 +79,31 @@ class RewriteQueryFn(Protocol):
     async def __call__(self, query: str) -> str: ...
 
 
+class DecomposeFn(Protocol):
+    """Decompose a complex query into independent sub-queries."""
+    async def __call__(self, query: str) -> list[str]: ...
+
+
+class GapCheckFn(Protocol):
+    """Check if retrieved facts cover all query constraints, return gap queries."""
+    async def __call__(self, query: str, retrieved_facts: list[str]) -> list[str]: ...
+
+
 class UpdateNodeFn(Protocol):
     """Increment access_count + update last_accessed for recalled node IDs."""
     async def __call__(self, ids: tuple[str, ...]) -> Result[None, NodeWriteError]: ...
+
+
+class BM25SearchFn(Protocol):
+    """Full-text BM25 search over node content via FTS5."""
+    async def __call__(self, query_text: str, top_k: int) -> list[tuple[str, float]]: ...
+
+
+class GraphSearchFn(Protocol):
+    """1-hop graph expansion from seed node IDs via edges table."""
+    async def __call__(self, seed_ids: tuple[str, ...]) -> list[tuple[str, float]]: ...
+
+
+class DecayMapFn(Protocol):
+    """Fetch decay_factor mapping for a set of node IDs."""
+    def __call__(self, node_ids: list[str]) -> dict[str, float]: ...

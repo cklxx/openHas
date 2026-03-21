@@ -1,6 +1,9 @@
 from .auth import authenticate as authenticate
 from .consolidation import consolidate as consolidate
 from .ingestion import make_ingestion_gate as make_ingestion_gate
+from .memory import HybridConfig as HybridConfig
+from .memory import HybridDeps as HybridDeps
+from .memory import make_hybrid_recall as make_hybrid_recall
 from .memory import make_hyde_recall as make_hyde_recall
 from .memory import make_iterative_recall as make_iterative_recall
 from .memory import make_recall as make_recall

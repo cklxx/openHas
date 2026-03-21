@@ -28,13 +28,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import httpx
 from huggingface_hub import hf_hub_download
+from src.adapters.cross_encoder_rerank import make_cross_encoder_rerank_fn
+from src.adapters.llama_decompose import make_llama_decompose_fn
 from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
 from src.adapters.llama_expand import make_llama_expand_fn
+from src.adapters.llama_gap_check import make_llama_gap_check_fn
 from src.adapters.llama_hyde import make_llama_hyde_fn
-from src.adapters.cross_encoder_rerank import make_cross_encoder_rerank_fn
 from src.adapters.llama_rerank import make_llama_rerank_fn
 from src.adapters.llama_rewrite import make_llama_rewrite_fn
 from src.adapters.sqlite_vec_store import (
+    make_bm25_search_fn,
+    make_decay_map_fn,
+    make_graph_search_fn,
     make_hydrate_fn,
     make_primary_search_fn,
     make_search_fn,
@@ -45,7 +50,12 @@ from src.adapters.sqlite_vec_store import (
 )
 from src.core.consolidation import consolidate
 from src.core.memory import (
+    HybridDeps,
     RecallDeps,
+    HybridConfig,
+    make_decomposed_recall,
+    make_gap_filled_recall,
+    make_hybrid_recall,
     make_hyde_recall,
     make_iterative_recall,
     make_recall,
@@ -255,8 +265,14 @@ class _EvalFlags:
     use_iterative: bool
     use_rerank: bool
     use_rewrite: bool
+    use_decompose: bool
+    use_gap_fill: bool
     category: str | None = None
     cross_encoder_path: str | None = None
+    hybrid: bool = False
+    use_bm25: bool = True
+    use_graph: bool = True
+    use_temporal: bool = True
 
 
 def _print_row(row: dict) -> tuple[float, ...]:  # type: ignore[type-arg]
@@ -332,6 +348,35 @@ def _print_categories(cases_path: str) -> None:
         print(f"  {cat:<20} {counts[cat]} cases")
 
 
+def _add_hybrid_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--hybrid", action="store_true",
+                   help="Use hybrid multi-channel recall")
+    p.add_argument("--no-bm25", action="store_true",
+                   help="Disable BM25 channel in hybrid mode")
+    p.add_argument("--no-graph", action="store_true",
+                   help="Disable graph-edge channel in hybrid mode")
+    p.add_argument("--no-temporal", action="store_true",
+                   help="Disable temporal re-scoring in hybrid mode")
+
+
+def _add_pipeline_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--no-hyde", action="store_true",
+                   help="Disable HyDE query-time expansion")
+    p.add_argument("--no-iterative", action="store_true",
+                   help="Disable multi-hop iterative retrieval")
+    p.add_argument("--no-rerank", action="store_true",
+                   help="Disable LLM reranker")
+    p.add_argument("--rewrite", action="store_true",
+                   help="Enable query rewriting")
+    p.add_argument("--decompose", action="store_true",
+                   help="Enable query decomposition")
+    p.add_argument("--gap-fill", action="store_true",
+                   help="Enable evidence-gap detection and filling")
+    p.add_argument("--cross-encoder", metavar="PATH", nargs="?",
+                   const=str(_DEFAULT_CE_MODEL),
+                   help="Use cross-encoder reranker instead of LLM")
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Recall quality evaluation")
     p.add_argument("--embed-model", metavar="PATH",
@@ -340,25 +385,16 @@ def _parse_args() -> argparse.Namespace:
                    help="Predict GGUF (auto-downloaded if omitted)")
     p.add_argument("--cases", metavar="PATH", default=str(_DEFAULT_CASES),
                    help="JSONL file with eval cases")
-    p.add_argument("--no-hyde", action="store_true",
-                   help="Disable HyDE query-time expansion (faster, lower recall)")
-    p.add_argument("--no-iterative", action="store_true",
-                   help="Disable multi-hop iterative retrieval (faster, lower recall)")
-    p.add_argument("--no-rerank", action="store_true",
-                   help="Disable LLM reranker (faster, lower recall on cue/referential/multi-hop)")
-    p.add_argument("--rewrite", action="store_true",
-                   help="Enable query rewriting to surface implicit knowledge")
     p.add_argument("--rebuild-expansion", action="store_true",
-                   help="Regenerate expansion cache (default: reuse if exists)")
+                   help="Regenerate expansion cache")
     p.add_argument("--tune", action="store_true",
-                   help="Grid search _W_HYDE, report best weight per category")
+                   help="Grid search _W_HYDE")
     p.add_argument("--category", metavar="CAT",
-                   help="Run only cases matching this category (see --list-categories)")
+                   help="Run only cases matching this category")
     p.add_argument("--list-categories", action="store_true",
-                   help="Print available categories with case counts, then exit")
-    p.add_argument("--cross-encoder", metavar="PATH", nargs="?",
-                   const=str(_DEFAULT_CE_MODEL),
-                   help="Use cross-encoder reranker instead of LLM (default: evals/reranker_model/)")
+                   help="Print available categories, then exit")
+    _add_pipeline_args(p)
+    _add_hybrid_args(p)
     return p.parse_args()
 
 
@@ -417,19 +453,41 @@ async def _store_corpus(conn: object, embed_url: str, predict_url: str) -> None:
         _save_expansion_cache(exp_cache)
 
 
+def _store_edges(conn: object) -> None:
+    """Insert corpus edges into the edges table for graph search."""
+    now = time.time()
+    for src, tgt in _CORPUS_EDGES:
+        conn.execute(  # type: ignore[union-attr]
+            "INSERT OR IGNORE INTO edges "
+            "(source_id, target_id, user_id, kind, weight, created_at) "
+            "VALUES (?, ?, 'eval', 'supersedes', 1.0, ?)",
+            (src, tgt, now),
+        )
+    conn.commit()  # type: ignore[union-attr]
+
+
+def _make_all_fns(conn: object, embed_url: str) -> tuple[object, ...]:
+    """Create all adapter fns from a populated DB."""
+    return (
+        make_query_embed_fn(embed_url),
+        make_doc_embed_fn(embed_url),
+        make_search_fn(conn, 'eval'),  # type: ignore[arg-type]
+        make_primary_search_fn(conn, 'eval'),  # type: ignore[arg-type]
+        make_hydrate_fn(conn, 'eval'),  # type: ignore[arg-type]
+        make_update_access_fn(conn, 'eval'),  # type: ignore[arg-type]
+        _compute_decayed_ids(_build_memory_graph()),
+        make_bm25_search_fn(conn, 'eval'),  # type: ignore[arg-type]
+        make_graph_search_fn(conn, 'eval'),  # type: ignore[arg-type]
+        make_decay_map_fn(conn, 'eval'),  # type: ignore[arg-type]
+    )
+
+
 async def _setup_db(embed_url: str, predict_url: str) -> tuple[object, ...]:
     """Store corpus into in-memory sqlite-vec DB; return factories + decayed_ids."""
     conn = open_db(':memory:')
     await _store_corpus(conn, embed_url, predict_url)
-    graph = _build_memory_graph()
-    decayed_ids = _compute_decayed_ids(graph)
-    search = make_search_fn(conn, 'eval')
-    primary_search = make_primary_search_fn(conn, 'eval')
-    hydrate = make_hydrate_fn(conn, 'eval')
-    update_access = make_update_access_fn(conn, 'eval')
-    query_embed = make_query_embed_fn(embed_url)
-    doc_embed = make_doc_embed_fn(embed_url)
-    return query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids
+    _store_edges(conn)
+    return _make_all_fns(conn, embed_url)
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,12 +507,43 @@ def _make_base(ctx: _BaseCtx, use_hyde: bool):  # type: ignore[return]
     )
 
 
+def _apply_postprocessing(
+    recall: object, db_tuple: tuple[object, ...],
+    predict_url: str, flags: _EvalFlags,
+):  # type: ignore[return]
+    """Apply decompose, gap-fill, rerank, rewrite wrappers."""
+    (query_embed, _doc, search, _ps, hydrate,
+     _ua, decayed_ids, _bm25, _graph, _decay) = db_tuple
+    if flags.use_decompose:
+        recall = make_decomposed_recall(
+            recall, make_llama_decompose_fn(predict_url), hydrate,
+        )
+    if flags.use_gap_fill:
+        recall = make_gap_filled_recall(
+            recall, make_llama_gap_check_fn(predict_url),
+            query_embed, search, hydrate,
+        )
+    if flags.use_rerank:
+        rerank_fn = (
+            make_cross_encoder_rerank_fn(flags.cross_encoder_path)
+            if flags.cross_encoder_path
+            else make_llama_rerank_fn(predict_url)
+        )
+        recall = make_reranked_recall(recall, rerank_fn, hydrate, decayed_ids)
+    if flags.use_rewrite:
+        recall = make_rewritten_recall(recall, make_llama_rewrite_fn(predict_url))
+    return recall
+
+
 def _build_from_db(
     db_tuple: tuple[object, ...], predict_url: str,
     flags: _EvalFlags, hyde_weight: float = 0.15,
 ):  # type: ignore[return]
     """Build recall stack from pre-indexed DB — no re-indexing."""
-    query_embed, doc_embed, search, primary_search, hydrate, update_access, decayed_ids = db_tuple
+    if flags.hybrid:
+        return _build_hybrid(db_tuple, predict_url, flags)
+    (query_embed, doc_embed, search, primary_search, hydrate,
+     update_access, *_rest) = db_tuple
     deps = RecallDeps(  # type: ignore[arg-type]
         search=search, query_embed=query_embed, hydrate=hydrate,
         primary_search=primary_search, hyde_weight=hyde_weight,
@@ -466,17 +555,32 @@ def _build_from_db(
     recall = _make_base(ctx, flags.use_hyde)
     if flags.use_iterative:
         recall = make_iterative_recall(recall, query_embed, search, hydrate)
-    if flags.use_rerank:
-        if flags.cross_encoder_path:
-            rerank_fn = make_cross_encoder_rerank_fn(flags.cross_encoder_path)
-        else:
-            rerank_fn = make_llama_rerank_fn(predict_url)
-        recall = make_reranked_recall(
-            recall, rerank_fn, hydrate, decayed_ids,
-        )
-    if flags.use_rewrite:
-        recall = make_rewritten_recall(recall, make_llama_rewrite_fn(predict_url))
-    return recall
+    return _apply_postprocessing(recall, db_tuple, predict_url, flags)
+
+
+def _build_hybrid(
+    db_tuple: tuple[object, ...], predict_url: str,
+    flags: _EvalFlags,
+):  # type: ignore[return]
+    """Build hybrid multi-channel recall pipeline."""
+    (query_embed, _doc, search, _ps, hydrate,
+     _ua, _dec, bm25_search, graph_search, decay_map_fn) = db_tuple
+    hybrid_deps = HybridDeps(  # type: ignore[arg-type]
+        dense_search=search,
+        bm25_search=bm25_search,
+        graph_search=graph_search,
+        embed=query_embed,
+        hydrate=hydrate,
+        decay_map_fn=decay_map_fn,
+    )
+    hybrid_cfg = HybridConfig(
+        use_bm25=flags.use_bm25,
+        use_graph=flags.use_graph,
+        use_temporal=flags.use_temporal,
+        temporal_decay=0.0001,
+    )
+    recall = make_hybrid_recall(hybrid_deps, now_fn=time.time, cfg=hybrid_cfg)
+    return _apply_postprocessing(recall, db_tuple, predict_url, flags)
 
 
 async def _build_recall(
@@ -541,8 +645,14 @@ def _flags_from_args(args: argparse.Namespace) -> _EvalFlags:
         use_iterative=not args.no_iterative,
         use_rerank=not args.no_rerank,
         use_rewrite=args.rewrite,
+        use_decompose=args.decompose,
+        use_gap_fill=getattr(args, 'gap_fill', False),
         category=args.category,
         cross_encoder_path=getattr(args, 'cross_encoder', None),
+        hybrid=getattr(args, 'hybrid', False),
+        use_bm25=not getattr(args, 'no_bm25', False),
+        use_graph=not getattr(args, 'no_graph', False),
+        use_temporal=not getattr(args, 'no_temporal', False),
     )
 
 

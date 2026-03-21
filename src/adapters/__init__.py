@@ -8,7 +8,10 @@ from .llama_rerank import make_llama_rerank_fn as make_llama_rerank_fn
 from .llama_rewrite import make_llama_rewrite_fn as make_llama_rewrite_fn
 from .sqlite_store import make_sqlite_query as make_sqlite_query
 from .sqlite_vec_store import load_graph as load_graph
+from .sqlite_vec_store import make_bm25_search_fn as make_bm25_search_fn
+from .sqlite_vec_store import make_decay_map_fn as make_decay_map_fn
 from .sqlite_vec_store import make_executor as make_executor
+from .sqlite_vec_store import make_graph_search_fn as make_graph_search_fn
 from .sqlite_vec_store import make_hydrate_fn as make_hydrate_fn
 from .sqlite_vec_store import make_list_pending_fn as make_list_pending_fn
 from .sqlite_vec_store import make_primary_search_fn as make_primary_search_fn
