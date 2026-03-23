@@ -217,3 +217,30 @@ The existing `make_*` factory pattern can be extended: `make_streaming_recall(..
 **Effort:** L (human: ~2 days / CC: ~20 min)
 **Priority:** P2 (when FastAPI entrypoint exists)
 **Depends on:** TODO-3 (FastAPI entrypoint)
+
+---
+
+### [TODO-10] AutoRecall — self-improving eval loop + proactive surfacing (IN PROGRESS)
+
+**What:** Formalize the self-improving training loop as a reproducible research framework.
+`evals/autorecall.py` chains eval → export failures → mine hard negatives → retrain CE → re-eval
+automatically. Extend with proactive surfacing: a new eval dimension where the system surfaces
+relevant memories without being asked.
+
+**Why:** The self-improving loop (R@1 0.70→0.96 in one cycle) is the core research contribution.
+Formalizing it enables multi-cycle optimization, convergence analysis, and reproducible benchmarks
+for publication.
+
+**Pros:** Publishable methodology. Open benchmark (155 retrieval + 50 proactive cases).
+Reproducible results. Self-improving proactive surfacing is genuinely novel.
+
+**Cons:** Proactive CE requires separate training data (context, memory pairs). 50 eval cases
+is borderline for fine-tuning — may need paraphrase augmentation.
+
+**Context:** Design doc at `~/.gstack/projects/cklxx-openHas/bytedance-main-design-20260322-224838.md`.
+Phase 1 (autorecall loop) and Phase 3 (proactive engine) are implemented. Phase 4 (self-improving
+proactive) and Phase 2 (wiring proactive eval to live engine) remain.
+
+**Effort:** L (human: ~2 weeks / CC: ~2 hours)
+**Priority:** P1
+**Depends on:** existing eval harness, CE training pipeline

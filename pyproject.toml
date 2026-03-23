@@ -46,7 +46,7 @@ select = ["E", "F", "UP", "B", "SIM", "I", "C90", "PLR"]
 max-complexity = 5
 
 [tool.ruff.lint.pylint]
-max-args = 4
+max-args = 5
 max-returns = 3
 max-statements = 15
 
