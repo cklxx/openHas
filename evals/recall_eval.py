@@ -22,6 +22,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -50,9 +51,9 @@ from src.adapters.sqlite_vec_store import (
 )
 from src.core.consolidation import consolidate
 from src.core.memory import (
+    HybridConfig,
     HybridDeps,
     RecallDeps,
-    HybridConfig,
     make_decomposed_recall,
     make_gap_filled_recall,
     make_hybrid_recall,
@@ -265,10 +266,12 @@ class _EvalFlags:
     use_iterative: bool
     use_rerank: bool
     use_rewrite: bool
+    use_augment: bool
     use_decompose: bool
     use_gap_fill: bool
     category: str | None = None
     cross_encoder_path: str | None = None
+    export_failures: str | None = None
     hybrid: bool = False
     use_bm25: bool = True
     use_graph: bool = True
@@ -367,7 +370,9 @@ def _add_pipeline_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-rerank", action="store_true",
                    help="Disable LLM reranker")
     p.add_argument("--rewrite", action="store_true",
-                   help="Enable query rewriting")
+                   help="Enable query rewriting (replaces original query)")
+    p.add_argument("--augment", action="store_true",
+                   help="Enable augmented recall (original + rewritten in parallel)")
     p.add_argument("--decompose", action="store_true",
                    help="Enable query decomposition")
     p.add_argument("--gap-fill", action="store_true",
@@ -375,6 +380,8 @@ def _add_pipeline_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--cross-encoder", metavar="PATH", nargs="?",
                    const=str(_DEFAULT_CE_MODEL),
                    help="Use cross-encoder reranker instead of LLM")
+    p.add_argument("--export-failures", metavar="PATH",
+                   help="Export failure analysis to JSONL for hard-negative mining")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -389,6 +396,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Regenerate expansion cache")
     p.add_argument("--tune", action="store_true",
                    help="Grid search _W_HYDE")
+    p.add_argument("--tune-hybrid", action="store_true",
+                   help="Grid search hybrid RRF k and channel weights")
     p.add_argument("--category", metavar="CAT",
                    help="Run only cases matching this category")
     p.add_argument("--list-categories", action="store_true",
@@ -507,6 +516,13 @@ def _make_base(ctx: _BaseCtx, use_hyde: bool):  # type: ignore[return]
     )
 
 
+def _make_rerank_fn(predict_url: str, flags: _EvalFlags):  # type: ignore[return]
+    """Choose reranker: cross-encoder if path given, else LLM."""
+    if flags.cross_encoder_path:
+        return make_cross_encoder_rerank_fn(flags.cross_encoder_path)
+    return make_llama_rerank_fn(predict_url)
+
+
 def _apply_postprocessing(
     recall: object, db_tuple: tuple[object, ...],
     predict_url: str, flags: _EvalFlags,
@@ -523,15 +539,15 @@ def _apply_postprocessing(
             recall, make_llama_gap_check_fn(predict_url),
             query_embed, search, hydrate,
         )
+    needs_rewrite = flags.use_rewrite or flags.use_augment
+    rewrite_fn = make_llama_rewrite_fn(predict_url) if needs_rewrite else None
+    if flags.use_rewrite and rewrite_fn:
+        recall = make_rewritten_recall(recall, rewrite_fn)
     if flags.use_rerank:
-        rerank_fn = (
-            make_cross_encoder_rerank_fn(flags.cross_encoder_path)
-            if flags.cross_encoder_path
-            else make_llama_rerank_fn(predict_url)
+        recall = make_reranked_recall(
+            recall, _make_rerank_fn(predict_url, flags), hydrate, decayed_ids,
+            rewrite_fn=rewrite_fn if flags.use_augment else None,
         )
-        recall = make_reranked_recall(recall, rerank_fn, hydrate, decayed_ids)
-    if flags.use_rewrite:
-        recall = make_rewritten_recall(recall, make_llama_rewrite_fn(predict_url))
     return recall
 
 
@@ -563,24 +579,8 @@ def _build_hybrid(
     flags: _EvalFlags,
 ):  # type: ignore[return]
     """Build hybrid multi-channel recall pipeline."""
-    (query_embed, _doc, search, _ps, hydrate,
-     _ua, _dec, bm25_search, graph_search, decay_map_fn) = db_tuple
-    hybrid_deps = HybridDeps(  # type: ignore[arg-type]
-        dense_search=search,
-        bm25_search=bm25_search,
-        graph_search=graph_search,
-        embed=query_embed,
-        hydrate=hydrate,
-        decay_map_fn=decay_map_fn,
-    )
-    hybrid_cfg = HybridConfig(
-        use_bm25=flags.use_bm25,
-        use_graph=flags.use_graph,
-        use_temporal=flags.use_temporal,
-        temporal_decay=0.0001,
-    )
-    recall = make_hybrid_recall(hybrid_deps, now_fn=time.time, cfg=hybrid_cfg)
-    return _apply_postprocessing(recall, db_tuple, predict_url, flags)
+    default_cfg = HybridConfig(True, True, True, 0.0001)
+    return _build_hybrid_tuned(db_tuple, predict_url, flags, default_cfg)
 
 
 async def _build_recall(
@@ -624,6 +624,92 @@ async def _run_tune(embed_url: str, predict_url: str, cases_path: str, flags: _E
     print(f"\nBest: _W_HYDE={best_w:.2f} (R@1={best_r1:.3f})")
 
 
+_RRF_K_GRID = [10, 20, 40, 60, 80, 100]
+_DENSE_W_GRID = [1.0, 1.5, 2.0]
+_BM25_W_GRID = [0.5, 1.0, 1.5]
+_GRAPH_W_GRID = [0.3, 0.5, 1.0]
+
+
+def _build_hybrid_tuned(
+    db_tuple: tuple[object, ...], predict_url: str,
+    flags: _EvalFlags, cfg: HybridConfig,
+):  # type: ignore[return]
+    """Build hybrid recall with explicit config for grid search."""
+    (query_embed, _doc, search, _ps, hydrate,
+     _ua, _dec, bm25_search, graph_search, decay_map_fn) = db_tuple
+    hybrid_deps = HybridDeps(  # type: ignore[arg-type]
+        dense_search=search, bm25_search=bm25_search,
+        graph_search=graph_search, embed=query_embed,
+        hydrate=hydrate, decay_map_fn=decay_map_fn,
+    )
+    merged = dc_replace(
+        cfg, use_bm25=flags.use_bm25,
+        use_graph=flags.use_graph, use_temporal=flags.use_temporal,
+    )
+    recall = make_hybrid_recall(hybrid_deps, now_fn=time.time, cfg=merged)
+    return _apply_postprocessing(recall, db_tuple, predict_url, flags)
+
+
+@dataclass(frozen=True, slots=True)
+class _TuneCtx:
+    db_tuple: tuple[object, ...]
+    predict_url: str
+    flags: _EvalFlags
+    cases: list[dict]  # type: ignore[type-arg]
+
+
+async def _sweep_rrf_k(ctx: _TuneCtx) -> int:
+    """Grid search RRF k; return best k value."""
+    print(f"Stage 1: RRF k over {_RRF_K_GRID} ({len(ctx.cases)} cases)\n")
+    best_k, best_r1 = 60, 0.0
+    for k in _RRF_K_GRID:
+        cfg = HybridConfig(True, True, True, 0.0001, rrf_k=k)
+        recall = _build_hybrid_tuned(ctx.db_tuple, ctx.predict_url, ctx.flags, cfg)
+        r1 = _mean_r1(await _run_recall(recall, ctx.cases))
+        marker = " ← best" if r1 > best_r1 else ""
+        print(f"  k={k:<4}  R@1={r1:.3f}{marker}")
+        if r1 > best_r1:
+            best_k, best_r1 = k, r1
+    print(f"\nBest k={best_k} (R@1={best_r1:.3f})\n")
+    return best_k
+
+
+async def _sweep_channel_weights(ctx: _TuneCtx, rrf_k: int) -> None:
+    """Grid search per-channel weights using given k."""
+    print(f"Stage 2: channel weights with k={rrf_k}\n")
+    best_combo, best_r1 = (1.0, 1.0, 1.0), 0.0
+    for dw in _DENSE_W_GRID:
+        for bw in _BM25_W_GRID:
+            for gw in _GRAPH_W_GRID:
+                cfg = HybridConfig(
+                    True, True, True, 0.0001,
+                    rrf_k=rrf_k, dense_weight=dw,
+                    bm25_weight=bw, graph_weight=gw,
+                )
+                recall = _build_hybrid_tuned(
+                    ctx.db_tuple, ctx.predict_url, ctx.flags, cfg,
+                )
+                r1 = _mean_r1(await _run_recall(recall, ctx.cases))
+                marker = " ← best" if r1 > best_r1 else ""
+                print(f"  d={dw:.1f} b={bw:.1f} g={gw:.1f}  R@1={r1:.3f}{marker}")
+                if r1 > best_r1:
+                    best_combo, best_r1 = (dw, bw, gw), r1
+    dw, bw, gw = best_combo
+    print(f"\nBest: k={rrf_k} dense={dw} bm25={bw} graph={gw} R@1={best_r1:.3f}")
+
+
+async def _run_tune_hybrid(
+    embed_url: str, predict_url: str, cases_path: str, flags: _EvalFlags,
+) -> None:
+    """Two-stage grid search: (1) RRF k, (2) channel weights."""
+    cases = _load_scored_cases(cases_path, flags.category)
+    await asyncio.gather(_wait_ready(embed_url), _wait_ready(predict_url))
+    db_tuple = await _setup_db(embed_url, predict_url)
+    ctx = _TuneCtx(db_tuple=db_tuple, predict_url=predict_url, flags=flags, cases=cases)
+    best_k = await _sweep_rrf_k(ctx)
+    await _sweep_channel_weights(ctx, best_k)
+
+
 async def _run_eval(embed_url: str, predict_url: str, cases_path: str, flags: _EvalFlags) -> None:
     cases = _load_cases(cases_path)
     if flags.category:
@@ -637,6 +723,26 @@ async def _run_eval(embed_url: str, predict_url: str, cases_path: str, flags: _E
     recall = await _build_recall(embed_url, predict_url, flags)
     rows = await _run_recall(recall, cases)
     _print_recall_report(rows)
+    if flags.export_failures:
+        _export_failures(rows, flags.export_failures)
+
+
+def _export_failures(rows: list[dict], out_path: str) -> None:  # type: ignore[type-arg]
+    """Export failure data for hard-negative mining."""
+    failures = []
+    for row in rows:
+        if _recall_at(row["returned"], row["expected"], 1) < 1.0:
+            failures.append({
+                "query": row["query"],
+                "category": row["category"],
+                "expected_ids": list(row["expected"]),
+                "returned_ids": row["returned"],
+                "confusers": [r for r in row["returned"] if r not in row["expected"]],
+            })
+    Path(out_path).write_text(
+        "\n".join(json.dumps(f, ensure_ascii=False) for f in failures) + "\n"
+    )
+    print(f"\nExported {len(failures)} failures to {out_path}")
 
 
 def _flags_from_args(args: argparse.Namespace) -> _EvalFlags:
@@ -645,14 +751,16 @@ def _flags_from_args(args: argparse.Namespace) -> _EvalFlags:
         use_iterative=not args.no_iterative,
         use_rerank=not args.no_rerank,
         use_rewrite=args.rewrite,
+        use_augment=args.augment,
         use_decompose=args.decompose,
-        use_gap_fill=getattr(args, 'gap_fill', False),
+        use_gap_fill=args.gap_fill,
         category=args.category,
-        cross_encoder_path=getattr(args, 'cross_encoder', None),
-        hybrid=getattr(args, 'hybrid', False),
-        use_bm25=not getattr(args, 'no_bm25', False),
-        use_graph=not getattr(args, 'no_graph', False),
-        use_temporal=not getattr(args, 'no_temporal', False),
+        cross_encoder_path=args.cross_encoder,
+        export_failures=args.export_failures,
+        hybrid=args.hybrid,
+        use_bm25=not args.no_bm25,
+        use_graph=not args.no_graph,
+        use_temporal=not args.no_temporal,
     )
 
 
@@ -666,6 +774,8 @@ async def _dispatch(args: argparse.Namespace, embed_url: str, predict_url: str) 
     flags = _flags_from_args(args)
     if args.tune:
         await _run_tune(embed_url, predict_url, args.cases, flags)
+    elif args.tune_hybrid:
+        await _run_tune_hybrid(embed_url, predict_url, args.cases, flags)
     else:
         await _run_eval(embed_url, predict_url, args.cases, flags)
 
