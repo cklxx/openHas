@@ -32,6 +32,7 @@ from huggingface_hub import hf_hub_download
 from src.adapters.cross_encoder_rerank import make_cross_encoder_rerank_fn
 from src.adapters.llama_decompose import make_llama_decompose_fn
 from src.adapters.llama_embed import make_doc_embed_fn, make_query_embed_fn
+from src.adapters.llama_enrich import make_llama_enrich_fn
 from src.adapters.llama_expand import make_llama_expand_fn
 from src.adapters.llama_gap_check import make_llama_gap_check_fn
 from src.adapters.llama_hyde import make_llama_hyde_fn
@@ -291,6 +292,17 @@ def _pad(s: str, width: int) -> str:
 
 
 _EXPANSION_CACHE = Path(__file__).parent / "expansion_cache.json"
+_ENRICH_CACHE = Path(__file__).parent / "enrich_cache.json"
+
+
+def _load_enrich_cache() -> dict[str, str] | None:
+    if _ENRICH_CACHE.exists():
+        return json.loads(_ENRICH_CACHE.read_text())  # type: ignore[no-any-return]
+    return None
+
+
+def _save_enrich_cache(cache: dict[str, str]) -> None:
+    _ENRICH_CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
 
 
 _DEFAULT_CE_MODEL = Path(__file__).parent / "reranker_model"
@@ -475,27 +487,67 @@ async def _expand_node(
     return queries
 
 
+async def _enrich_node(
+    nid: str, text: str, enrich_fn: object, cache: dict[str, str],
+) -> str:
+    """Enrich a node with implicit knowledge; cache results."""
+    if nid in cache:
+        return cache[nid]
+    enrichment = await enrich_fn(text)
+    cache[nid] = enrichment
+    return enrichment
+
+
+@dataclass
+class _IndexCtx:
+    doc_embed: object
+    query_embed: object
+    enrich_fn: object
+    expand_fn: object
+    store_fn: object
+    store_expansion: object
+    exp_cache: dict[str, list[str]]
+    enrich_cache: dict[str, str]
+
+
+async def _index_node(
+    nid: str, text: str, n: MemoryNode, ctx: _IndexCtx,
+) -> None:
+    """Enrich, embed, and store a single corpus node."""
+    enrichment = await _enrich_node(nid, text, ctx.enrich_fn, ctx.enrich_cache)
+    enriched = f"{text}. Implications: {enrichment}"
+    emb = await ctx.doc_embed(enriched)
+    await ctx.store_fn(MemoryNode(
+        id=n.id, kind=n.kind, content=enriched,
+        event_time=n.event_time, record_time=n.record_time,
+        last_accessed=n.last_accessed, permanence=n.permanence, embedding=emb,
+    ))
+    queries = await _expand_node(nid, text, ctx.expand_fn, ctx.exp_cache)
+    await ctx.store_expansion(
+        nid, list(await asyncio.gather(*[ctx.query_embed(q) for q in queries])),
+    )
+
+
 async def _store_corpus(conn: object, embed_url: str, predict_url: str) -> None:
     """Embed all corpus nodes + store expansion embeddings into DB."""
-    doc_embed, query_embed = make_doc_embed_fn(embed_url), make_query_embed_fn(embed_url)
-    expand_fn = make_llama_expand_fn(predict_url)
     node_map = {n.id: n for n in _build_memory_graph().nodes}
-    store_fn = make_store_fn(conn, 'eval')  # type: ignore[arg-type]
-    store_expansion = make_store_expansion_fn(conn, 'eval')  # type: ignore[arg-type]
-    exp_cache: dict[str, list[str]] = _load_expansion_cache() or {}
-    print(f"Embedding + expanding {len(_CORPUS)} corpus nodes …")
+    ctx = _IndexCtx(
+        doc_embed=make_doc_embed_fn(embed_url),
+        query_embed=make_query_embed_fn(embed_url),
+        enrich_fn=make_llama_enrich_fn(predict_url),
+        expand_fn=make_llama_expand_fn(predict_url),
+        store_fn=make_store_fn(conn, 'eval'),  # type: ignore[arg-type]
+        store_expansion=make_store_expansion_fn(conn, 'eval'),  # type: ignore[arg-type]
+        exp_cache=_load_expansion_cache() or {},
+        enrich_cache=_load_enrich_cache() or {},
+    )
+    print(f"Embedding + enriching + expanding {len(_CORPUS)} corpus nodes …")
     for nid, text in _CORPUS:
-        n = node_map[nid]
-        emb = await doc_embed(text)
-        await store_fn(MemoryNode(
-            id=n.id, kind=n.kind, content=n.content,
-            event_time=n.event_time, record_time=n.record_time,
-            last_accessed=n.last_accessed, permanence=n.permanence, embedding=emb,
-        ))
-        queries = await _expand_node(nid, text, expand_fn, exp_cache)
-        await store_expansion(nid, list(await asyncio.gather(*[query_embed(q) for q in queries])))
+        await _index_node(nid, text, node_map[nid], ctx)
     if not _EXPANSION_CACHE.exists():
-        _save_expansion_cache(exp_cache)
+        _save_expansion_cache(ctx.exp_cache)
+    if not _ENRICH_CACHE.exists():
+        _save_enrich_cache(ctx.enrich_cache)
 
 
 def _store_edges(conn: object) -> None:
