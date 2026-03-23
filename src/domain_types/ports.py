@@ -69,9 +69,10 @@ class ExpandContextFn(Protocol):
 class RerankFn(Protocol):
     """Re-rank candidate MemoryNodes by relevance to a query text.
 
-    Returns node IDs in ranked order, most relevant first.
+    Returns (node_id, score) tuples in ranked order, most relevant first.
+    Score is a float in [0, 1] representing relevance confidence.
     """
-    async def __call__(self, query: str, nodes: list[MemoryNode]) -> list[str]: ...
+    async def __call__(self, query: str, nodes: list[MemoryNode]) -> list[tuple[str, float]]: ...
 
 
 class RewriteQueryFn(Protocol):
@@ -107,3 +108,15 @@ class GraphSearchFn(Protocol):
 class DecayMapFn(Protocol):
     """Fetch decay_factor mapping for a set of node IDs."""
     def __call__(self, node_ids: list[str]) -> dict[str, float]: ...
+
+
+class GraphNeighborFn(Protocol):
+    """1-hop neighbor lookup from seed node IDs via edges table."""
+    def __call__(
+        self, node_ids: tuple[str, ...],
+    ) -> list[tuple[str, str]]: ...  # (neighbor_id, edge_kind)
+
+
+class ScoreContextFn(Protocol):
+    """Score a (context, document) pair for proactive relevance."""
+    def __call__(self, context: str, doc: str) -> float: ...

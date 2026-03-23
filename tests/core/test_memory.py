@@ -240,8 +240,8 @@ async def test_reranked_recall_all_decayed_returns_base() -> None:
             'scores': (0.9,),
         })())
 
-    async def rerank(query: str, nodes: list) -> list[str]:
-        return [n.id for n in nodes]
+    async def rerank(query: str, nodes: list) -> list[tuple[str, float]]:
+        return [(n.id, 0.9) for n in nodes]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
         return {i: _make_node(i) for i in ids}
@@ -362,10 +362,9 @@ async def test_recall_passes_kinds_and_labels_to_search() -> None:
 
 
 def _streaming_deps(rerank_order: list[str] | None = None) -> RerankDeps:
-    async def rerank(query: str, nodes: list) -> list[str]:
-        if rerank_order is not None:
-            return rerank_order
-        return [n.id for n in nodes]
+    async def rerank(query: str, nodes: list) -> list[tuple[str, float]]:
+        ids = rerank_order if rerank_order is not None else [n.id for n in nodes]
+        return [(nid, 1.0 - i * 0.1) for i, nid in enumerate(ids)]
 
     async def hydrate(ids: tuple[str, ...]) -> dict[str, MemoryNode]:
         return {i: _make_node(i) for i in ids}
@@ -416,7 +415,7 @@ async def test_streaming_reranker_timeout_yields_only_initial() -> None:
     async def base(query: MemoryQuery):  # type: ignore[return]
         return ('ok', RecallResult(nodes=(_make_node('n1'),), scores=(0.9,)))
 
-    async def slow_rerank(query: str, nodes: list) -> list[str]:
+    async def slow_rerank(query: str, nodes: list) -> list[tuple[str, float]]:
         await asyncio.sleep(60)
         return []
 

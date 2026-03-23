@@ -22,14 +22,14 @@ def make_cross_encoder_rerank_fn(
     """
     model = CrossEncoder(model_path, device=device)
 
-    async def rerank(query: str, nodes: list[MemoryNode]) -> list[str]:
+    async def rerank(query: str, nodes: list[MemoryNode]) -> list[tuple[str, float]]:
         if not nodes:
             return []
         pairs = [(query, n.content) for n in nodes]
-        scores = model.predict(pairs)
+        scores: list[float] = model.predict(pairs)  # type: ignore[assignment]
         ranked = sorted(
-            zip(nodes, scores), key=lambda x: float(x[1]), reverse=True
+            zip(nodes, scores, strict=True), key=lambda x: float(x[1]), reverse=True
         )
-        return [n.id for n, _ in ranked]
+        return [(n.id, float(s)) for n, s in ranked]
 
     return rerank

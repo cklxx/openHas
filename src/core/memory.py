@@ -164,7 +164,7 @@ async def _safe_rerank(
     rerank_fn: RerankFn,
     query_text: str,
     candidates: list[MemoryNode],
-) -> list[str] | None:
+) -> list[tuple[str, float]] | None:
     try:
         return await asyncio.wait_for(
             rerank_fn(query_text, candidates), _RERANK_TIMEOUT
@@ -172,6 +172,10 @@ async def _safe_rerank(
     except Exception as exc:
         logger.warning("Reranker fallback (non-fatal): %s", exc)
         return None
+
+
+def _ranked_ids(ranked: list[tuple[str, float]]) -> list[str]:
+    return [nid for nid, _ in ranked]
 
 
 # ── Factory functions ─────────────────────────────────────────────────────────
@@ -290,8 +294,15 @@ def make_reranked_recall(
     rerank_fn: RerankFn,
     hydrate: HydrateFn,
     decayed_ids: frozenset[str],
+    rewrite_fn: RewriteQueryFn | None = None,
 ):
-    """Wrap a recall fn with an LLM reranking pass over a wider candidate pool."""
+    """Wrap a recall fn with reranking over a wider candidate pool.
+
+    When rewrite_fn is provided, both original and rewritten queries
+    are scored by the reranker. Each document keeps its max score across
+    both queries, preserving precision for KU queries while bridging
+    vocabulary gaps for cue_trigger queries.
+    """
 
     async def recall(query: MemoryQuery) -> Result[RecallResult, RecallError]:
         wide = MemoryQuery(text=query.text, top_k=query.top_k * _RERANK_FETCH_FACTOR)
@@ -299,16 +310,54 @@ def make_reranked_recall(
         candidates = _get_candidates(r, decayed_ids)
         if not candidates:
             return r  # type: ignore[return-value]
-        ranked_ids = await _safe_rerank(rerank_fn, query.text, candidates)
-        if ranked_ids is None:
+        rewritten = await _safe_rewrite(rewrite_fn, query.text) if rewrite_fn else None
+        ranked = await _dual_rerank(rerank_fn, query.text, rewritten, candidates)
+        if ranked is None:
             return r  # type: ignore[return-value]
-        hydrated = await hydrate(tuple(ranked_ids[:query.top_k]))
-        score_map: dict[str, float] = dict(zip(
-            (n.id for n in r[1].nodes), r[1].scores, strict=False  # type: ignore[index]
-        ))
-        return ('ok', _build_result(hydrated, ranked_ids[:query.top_k], score_map))
+        return await _hydrate_ranked(hydrate, ranked[:query.top_k], r)
 
     return recall
+
+
+async def _dual_rerank(
+    rerank_fn: RerankFn, original: str,
+    rewritten: str | None, candidates: list[MemoryNode],
+) -> list[str] | None:
+    """Rerank with both queries in parallel, merge by best rank."""
+    if rewritten is None or rewritten == original:
+        ranked = await _safe_rerank(rerank_fn, original, candidates)
+        return _ranked_ids(ranked) if ranked else None
+    ranked_orig, ranked_alt = await asyncio.gather(
+        _safe_rerank(rerank_fn, original, candidates),
+        _safe_rerank(rerank_fn, rewritten, candidates),
+    )
+    if ranked_orig is None:
+        return None
+    return _merge_rankings(ranked_orig, ranked_alt) if ranked_alt else _ranked_ids(ranked_orig)
+
+
+def _merge_rankings(
+    r1: list[tuple[str, float]], r2: list[tuple[str, float]],
+) -> list[str]:
+    """Merge two rankings by best (lowest) rank per ID."""
+    best_rank: dict[str, int] = {}
+    for rank, (nid, _) in enumerate(r1):
+        best_rank[nid] = rank
+    for rank, (nid, _) in enumerate(r2):
+        best_rank[nid] = min(best_rank.get(nid, rank), rank)
+    return sorted(best_rank, key=best_rank.__getitem__)
+
+
+async def _hydrate_ranked(
+    hydrate: HydrateFn, ranked_ids: list[str],
+    r: Result[RecallResult, RecallError],
+) -> Result[RecallResult, RecallError]:
+    """Hydrate ranked IDs and build result with original scores."""
+    hydrated = await hydrate(tuple(ranked_ids))
+    score_map: dict[str, float] = dict(zip(
+        (n.id for n in r[1].nodes), r[1].scores, strict=False  # type: ignore[index]
+    ))
+    return ('ok', _build_result(hydrated, ranked_ids, score_map))
 
 
 _StreamResult = AsyncGenerator[Result[RecallResult, RecallError], None]
@@ -355,9 +404,10 @@ async def _rerank_phase(
     candidates = _get_candidates(r, deps.decayed_ids)
     if not candidates:
         return None
-    ranked_ids = await _safe_rerank(deps.rerank_fn, query.text, candidates)
-    if ranked_ids is None:
+    ranked = await _safe_rerank(deps.rerank_fn, query.text, candidates)
+    if ranked is None:
         return None
+    ranked_ids = _ranked_ids(ranked)
     hydrated = await deps.hydrate(tuple(ranked_ids[:query.top_k]))
     score_map: dict[str, float] = dict(zip(
         (n.id for n in r[1].nodes), r[1].scores, strict=False  # type: ignore[index]
@@ -384,40 +434,105 @@ def make_rewritten_recall(
     return recall
 
 
+def make_augmented_recall(
+    base_recall: _RecallFn,
+    rewrite_fn: RewriteQueryFn,
+):
+    """Run original + rewritten query in parallel, merge by max score.
+
+    Unlike make_rewritten_recall which replaces the query, this preserves
+    the original query's precision while gaining the rewrite's coverage.
+    """
+
+    async def recall(query: MemoryQuery) -> Result[RecallResult, RecallError]:
+        rewritten = await _safe_rewrite(rewrite_fn, query.text)
+        rewritten_q = MemoryQuery(text=rewritten, top_k=query.top_k)
+        r_orig, r_rewrite = await asyncio.gather(
+            base_recall(query), base_recall(rewritten_q),
+        )
+        return _merge_recall_results(r_orig, r_rewrite, query.top_k)
+
+    return recall
+
+
+async def _safe_rewrite(rewrite_fn: RewriteQueryFn, text: str) -> str:
+    try:
+        return await asyncio.wait_for(rewrite_fn(text), _REWRITE_TIMEOUT)
+    except Exception as exc:
+        logger.warning("Rewrite fallback (non-fatal): %s", exc)
+        return text
+
+
+def _collect_best_nodes(
+    result: RecallResult, merged: dict[str, float], node_map: dict[str, MemoryNode],
+) -> None:
+    """Update merged scores and node_map with max-score entries from result."""
+    for node, score in zip(result.nodes, result.scores, strict=True):
+        if score > merged.get(node.id, -1.0):
+            merged[node.id] = score
+            node_map[node.id] = node
+
+
+def _merge_recall_results(
+    r1: Result[RecallResult, RecallError],
+    r2: Result[RecallResult, RecallError],
+    top_k: int,
+) -> Result[RecallResult, RecallError]:
+    """Merge two recall results, keeping max score per node."""
+    if r1[0] == 'err':
+        return r2
+    if r2[0] == 'err':
+        return r1
+    merged: dict[str, float] = {}
+    node_map: dict[str, MemoryNode] = {}
+    _collect_best_nodes(r1[1], merged, node_map)
+    _collect_best_nodes(r2[1], merged, node_map)
+    top_ids = sorted(merged, key=merged.__getitem__, reverse=True)[:top_k]
+    return ('ok', _build_result(node_map, top_ids, merged))
+
+
+async def _safe_decompose(
+    decompose_fn: DecomposeFn, text: str,
+) -> list[str] | None:
+    """Decompose query; return None on failure or single-query result."""
+    try:
+        subs = await asyncio.wait_for(decompose_fn(text), _DECOMPOSE_TIMEOUT)
+    except Exception as exc:
+        logger.warning("Decompose fallback (non-fatal): %s", exc)
+        return None
+    return subs if len(subs) > 1 else None
+
+
+def _merge_multi_results(
+    results: list[Result[RecallResult, RecallError]],
+) -> dict[str, float]:
+    """Merge multiple recall results by max score per node."""
+    merged: dict[str, float] = {}
+    for r in results:
+        if r[0] == 'err' or not r[1].nodes:
+            continue
+        for node, score in zip(r[1].nodes, r[1].scores, strict=True):
+            if score > merged.get(node.id, -1.0):
+                merged[node.id] = score
+    return merged
+
+
 def make_decomposed_recall(
     base_recall: _RecallFn,
     decompose_fn: DecomposeFn,
     hydrate: HydrateFn,
 ):
-    """Wrap a recall fn with query decomposition for multi-constraint queries.
-
-    Decomposes the query into sub-queries, runs base recall on each in parallel,
-    then merges results by max score per node. This widens the candidate pool
-    so the reranker can see constraints from different domains.
-    """
+    """Wrap a recall fn with query decomposition for multi-constraint queries."""
 
     async def recall(query: MemoryQuery) -> Result[RecallResult, RecallError]:
-        try:
-            subs = await asyncio.wait_for(
-                decompose_fn(query.text), _DECOMPOSE_TIMEOUT
-            )
-        except Exception as exc:
-            logger.warning("Decompose fallback (non-fatal): %s", exc)
-            return await base_recall(query)
-        if len(subs) <= 1:
+        subs = await _safe_decompose(decompose_fn, query.text)
+        if subs is None:
             return await base_recall(query)
         sub_queries = [MemoryQuery(text=s, top_k=query.top_k) for s in subs]
         results = await asyncio.gather(
-            base_recall(query),
-            *[base_recall(sq) for sq in sub_queries],
+            base_recall(query), *[base_recall(sq) for sq in sub_queries],
         )
-        merged: dict[str, float] = {}
-        for r in results:
-            if r[0] == 'err' or not r[1].nodes:
-                continue
-            for node, score in zip(r[1].nodes, r[1].scores):
-                if score > merged.get(node.id, -1.0):
-                    merged[node.id] = score
+        merged = _merge_multi_results(results)
         if not merged:
             return await base_recall(query)
         top_ids = sorted(merged, key=merged.__getitem__, reverse=True)[:query.top_k]
@@ -432,13 +547,16 @@ _TEMPORAL_DECAY_DEFAULT = 0.0001  # per-second decay factor for temporal re-scor
 
 
 def _rrf_fuse(
-    channels: list[list[tuple[str, float]]], k: int = _RRF_K,
+    channels: list[list[tuple[str, float]]],
+    k: int = _RRF_K,
+    weights: tuple[float, ...] | None = None,
 ) -> dict[str, float]:
     """Reciprocal Rank Fusion across multiple ranked lists."""
     scores: dict[str, float] = {}
-    for channel in channels:
+    for i, channel in enumerate(channels):
+        w = weights[i] if weights and i < len(weights) else 1.0
         for rank, (nid, _score) in enumerate(channel):
-            scores[nid] = scores.get(nid, 0.0) + 1.0 / (k + rank + 1)
+            scores[nid] = scores.get(nid, 0.0) + w / (k + rank + 1)
     return scores
 
 
@@ -469,6 +587,10 @@ class HybridConfig:
     use_graph: bool
     use_temporal: bool
     temporal_decay: float
+    rrf_k: int = _RRF_K
+    dense_weight: float = 1.0
+    bm25_weight: float = 1.0
+    graph_weight: float = 1.0
 
 
 async def _empty() -> list[tuple[str, float]]:
@@ -515,6 +637,20 @@ def _apply_temporal(
     return result
 
 
+def _channel_weights(
+    cfg: HybridConfig, channels: list[list[tuple[str, float]]],
+) -> tuple[float, ...]:
+    """Build weight tuple matching the order channels were appended."""
+    weights: list[float] = [cfg.dense_weight]
+    idx = 1
+    if cfg.use_bm25 and idx < len(channels):
+        weights.append(cfg.bm25_weight)
+        idx += 1
+    if cfg.use_graph and idx < len(channels):
+        weights.append(cfg.graph_weight)
+    return tuple(weights)
+
+
 async def _hybrid_core(
     deps: HybridDeps, cfg: HybridConfig,
     now_fn: NowFn, query: MemoryQuery,
@@ -526,7 +662,8 @@ async def _hybrid_core(
         channels = await _collect_channels(deps, cfg, q_emb, query, fetch_k)
     except Exception as e:
         return ('err', RecallError(code='SEARCH_FAILED', detail=str(e)))
-    fused = _rrf_fuse(channels)
+    channel_weights = _channel_weights(cfg, channels)
+    fused = _rrf_fuse(channels, k=cfg.rrf_k, weights=channel_weights)
     if not fused:
         return ('ok', RecallResult(nodes=(), scores=()))
     hydrated = await deps.hydrate(tuple(fused.keys()))
@@ -552,6 +689,47 @@ def make_hybrid_recall(
     return recall
 
 
+async def _safe_gap_check(
+    gap_check_fn: GapCheckFn, query_text: str, facts: list[str],
+) -> list[str] | None:
+    """Run gap check; return None on failure or no gaps."""
+    try:
+        gaps = await asyncio.wait_for(
+            gap_check_fn(query_text, facts), _GAP_CHECK_TIMEOUT,
+        )
+    except Exception as exc:
+        logger.warning("Gap check fallback (non-fatal): %s", exc)
+        return None
+    return gaps or None
+
+
+async def _fill_gaps(
+    gap_queries: list[str], query_embed: EmbedFn,
+    search: SearchFn, query: MemoryQuery,
+) -> list[tuple[str, float]]:
+    """Run embed+search for each gap query, collect all hits."""
+    all_hits: list[tuple[str, float]] = []
+    for gq in gap_queries:
+        try:
+            emb = await query_embed(gq)
+            hits = await search(emb, query.top_k, query.kinds, query.labels)
+            all_hits.extend(hits)
+        except Exception:
+            continue
+    return all_hits
+
+
+def _merge_gap_scores(
+    base: dict[str, float], gap_hits: list[tuple[str, float]],
+) -> dict[str, float]:
+    """Merge base scores with gap-fill hits, keeping max per node."""
+    merged = dict(base)
+    for nid, score in gap_hits:
+        if score > merged.get(nid, -1.0):
+            merged[nid] = score
+    return merged
+
+
 def make_gap_filled_recall(
     base_recall: _RecallFn,
     gap_check_fn: GapCheckFn,
@@ -561,8 +739,6 @@ def make_gap_filled_recall(
 ):
     """Wrap a recall fn with evidence-gap detection and filling.
 
-    After base recall, the LLM checks whether all query constraints are covered.
-    If gaps exist, targeted sub-queries retrieve missing facts and merge them in.
     Inspired by MemR³ (arxiv:2512.20237) evidence-gap tracking.
     """
 
@@ -571,31 +747,14 @@ def make_gap_filled_recall(
         if r1[0] == 'err' or not r1[1].nodes:
             return r1  # type: ignore[return-value]
         facts = [n.content for n in r1[1].nodes]
-        try:
-            gap_queries = await asyncio.wait_for(
-                gap_check_fn(query.text, facts), _GAP_CHECK_TIMEOUT
-            )
-        except Exception as exc:
-            logger.warning("Gap check fallback (non-fatal): %s", exc)
-            return r1  # type: ignore[return-value]
-        if not gap_queries:
+        gap_queries = await _safe_gap_check(gap_check_fn, query.text, facts)
+        if gap_queries is None:
             return r1  # type: ignore[return-value]
         r1_map = dict(zip(
-            (n.id for n in r1[1].nodes), r1[1].scores, strict=False
+            (n.id for n in r1[1].nodes), r1[1].scores, strict=True,
         ))
-        gap_hits: list[list[tuple[str, float]]] = []
-        for gq in gap_queries:
-            try:
-                emb = await query_embed(gq)
-                hits = await search(emb, query.top_k, query.kinds, query.labels)
-                gap_hits.append(hits)
-            except Exception:
-                continue
-        merged = dict(r1_map)
-        for hits in gap_hits:
-            for nid, score in hits:
-                if score > merged.get(nid, -1.0):
-                    merged[nid] = score
+        gap_hits = await _fill_gaps(gap_queries, query_embed, search, query)
+        merged = _merge_gap_scores(r1_map, gap_hits)
         top_ids = sorted(merged, key=merged.__getitem__, reverse=True)[:query.top_k]
         hydrated = await hydrate(tuple(top_ids))
         return ('ok', _build_result(hydrated, top_ids, merged))
