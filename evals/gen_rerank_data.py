@@ -64,6 +64,54 @@ _CORPUS: dict[str, str] = {
     ),
     "value-privacy":   "User values data privacy strongly, avoids apps that monetise user data",
     "value-worklife":  "User enforces work-life balance, does not check work messages after 9pm",
+    # v2 corpus
+    "finance-mortgage": "User has a monthly mortgage payment of 18k RMB due on the 5th",
+    "finance-budget":  "User sets a strict monthly dining-out budget of 3000 RMB for the family",
+    "med-iron": (
+        "User's doctor recommended daily iron supplements "
+        "taken on an empty stomach"
+    ),
+    "med-checkup":     "User has an annual physical checkup scheduled for April 15th",
+    "mentor-zhao": (
+        "User mentors a junior engineer named Zhao Wei "
+        "who joined 2 months ago"
+    ),
+    "conflict-li": (
+        "User has an ongoing disagreement with Li Ming "
+        "about microservice boundaries"
+    ),
+    "proj-migration": (
+        "User is leading a database migration from MySQL "
+        "to PostgreSQL, Q2 deadline"
+    ),
+    "proj-oncall": (
+        "User is on-call rotation for the payments service "
+        "every other week"
+    ),
+    "commute-metro": (
+        "User commutes via Metro Line 2, 35 minutes "
+        "door to door on office days"
+    ),
+    "fav-restaurant": (
+        "User's favorite restaurant is a Hunan place "
+        "on Nanjing West Road, 10 min walk"
+    ),
+    "pet-cat": (
+        "User has a cat named Mochi who needs medication "
+        "twice daily for kidney issues"
+    ),
+    "home-reno": (
+        "User is renovating the guest bedroom, "
+        "construction noise on weekends"
+    ),
+    "anxiety-public": (
+        "User experiences mild anxiety speaking to "
+        "groups larger than 20 people"
+    ),
+    "pref-cold": (
+        "User runs cold and always brings a jacket "
+        "to air-conditioned venues"
+    ),
 }
 
 _NEG_PER_POS = 7  # random negatives per positive pair
