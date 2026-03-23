@@ -1,3 +1,9 @@
 {"date": "2026-03-22", "commit": "07fbf4f", "description": "RRF k-parameter grid search (10-100) + channel weight grid (dense/bm25/graph)", "r1": 0.704, "r1_delta": 0.0, "ar5": 1.0, "reason": "No impact: cross-encoder reranker dominates final ranking; with 33 corpus nodes and 5x fetch factor, retrieval stage always surfaces all candidates regardless of RRF params"}
 {"date": "2026-03-22", "commit": "07fbf4f", "description": "--rewrite (global)", "r1": 0.68, "r1_delta": -0.02, "ar5": 1.0, "reason": "Helps cue_trigger (+0.22) and multi_hop (+0.07) but devastates KU (-0.16) and ku_filter (-0.22). Net R@1 regression."}
 {"date": "2026-03-22", "commit": "07fbf4f", "description": "--gap-fill", "r1": 0.70, "r1_delta": 0.0, "ar5": 1.0, "reason": "Zero impact on any category. Gap detection finds no gaps with current corpus."}
+{"date": "2026-03-22", "description": "LLM reranker (4B) on v2 hard benchmark", "r1": 0.60, "r1_delta": 0.0, "reason": "4B model lacks reasoning depth for chain_reasoning and cue_trigger cases"}
+{"date": "2026-03-22", "description": "LLM decompose on v2 hard benchmark", "r1": 0.41, "r1_delta": -0.19, "reason": "4B model decomposes queries incorrectly, breaking retrieval"}
+{"date": "2026-03-22", "description": "LLM rewrite on v2 hard benchmark", "r1": 0.53, "r1_delta": -0.07, "reason": "Rewriting destroys temporal/KU signals"}
+{"date": "2026-03-22", "description": "Augmented reranking with base CE", "r1": 0.56, "r1_delta": 0.0, "reason": "568M CE can't distinguish relevance even with rewritten queries"}
+{"date": "2026-03-22", "description": "Improved CoT reranker prompt", "r1": 0.52, "r1_delta": -0.08, "reason": "Longer prompt confuses 4B model, performance decreases"}
+{"date": "2026-03-22", "description": "gemma-2.6B CE (unfinetuned)", "r1": 0.56, "r1_delta": 0.0, "reason": "Larger CE still gives near-identical scores for relevant vs irrelevant docs"}

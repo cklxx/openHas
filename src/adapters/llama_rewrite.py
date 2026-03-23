@@ -8,11 +8,18 @@ bridging the vocabulary gap between query and stored memory facts.
 import httpx
 
 _SYSTEM = (
-    "Rewrite the following question to make implicit real-world knowledge "
-    "explicit. Add specific ingredients, substances, medical implications, "
-    "or scheduling consequences in parentheses where they help connect the "
-    "question to relevant personal facts. Keep the original meaning and tone. "
-    "Output ONLY the rewritten question, nothing else."
+    "You help retrieve personal memories. Rewrite the question by adding "
+    "implicit real-world knowledge in parentheses.\n\n"
+    "Rules:\n"
+    "- Food: list key ingredients and allergens. "
+    "E.g. 'tiramisu (mascarpone=dairy, Marsala wine=alcohol, coffee)'\n"
+    "- Health: spell out medical implications. "
+    "E.g. 'grapefruit (interacts with many medications)'\n"
+    "- Schedule: expand time references. "
+    "E.g. 'this evening (after work, ~6pm-11pm)'\n"
+    "- Travel: note duration, logistics, absence from home.\n"
+    "- Keep the original meaning. Do NOT answer the question.\n"
+    "- Output ONLY the rewritten question."
 )
 
 
@@ -25,7 +32,7 @@ def make_llama_rewrite_fn(base_url: str):  # type: ignore[return]
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": query},
             ],
-            "max_tokens": 128,
+            "max_tokens": 256,
             "temperature": 0.0,
         })
         text: str = r.json()["choices"][0]["message"]["content"]

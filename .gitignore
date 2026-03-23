@@ -7,3 +7,6 @@ __pycache__/
 dist/
 build/
 .ruff_cache/
+evals/reranker_model/
+checkpoints/
+evals/failures_*.jsonl
