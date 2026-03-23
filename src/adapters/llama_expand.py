@@ -10,15 +10,19 @@ import httpx
 from src.domain_types.ports import ExpandContextFn
 
 _SYSTEM = (
-    "Given a personal memory fact, output 5 queries where knowing THIS specific fact "
-    "is essential to answer correctly. "
-    "Include both direct questions and indirect scenario queries — real situations "
-    "where this fact determines the correct answer, even if the query does not "
-    "mention the fact directly (e.g. a food restriction applies to specific "
-    "ingredients; a schedule determines when someone is available). "
+    "Given a personal memory fact, output 10 diverse queries where THIS fact "
+    "is essential to answer correctly.\n\n"
+    "Query types to include:\n"
+    "- Direct questions about the fact\n"
+    "- Scenario questions where the fact is a hidden constraint\n"
+    "- Specific named items that relate to the fact (e.g. for 'lactose "
+    "intolerance': name foods like tiramisu, caesar salad, latte, whey "
+    "protein, cheese pizza, ice cream)\n"
+    "- Questions in Chinese and English (mix both)\n"
+    "- Questions about consequences and conflicts\n\n"
     "Each query must be unanswerable without this fact. "
-    "Avoid generic questions about the person's life. "
-    "Mix Chinese and English. One query per line. No numbering, no explanation."
+    "Avoid generic questions. Be specific and creative.\n"
+    "One query per line. No numbering, no explanation."
 )
 
 
@@ -31,7 +35,7 @@ def make_llama_expand_fn(base_url: str) -> ExpandContextFn:
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": memory_text},
             ],
-            "max_tokens": 256,
+            "max_tokens": 512,
             "temperature": 0.3,
         })
         text: str = r.json()["choices"][0]["message"]["content"]

@@ -15,14 +15,15 @@ _SYSTEM = (
     "rank the facts from most to least useful for answering the question.\n\n"
     "Ranking priority:\n"
     "- Facts that DIRECTLY answer or constrain the question rank highest\n"
-    "- For time/schedule questions: facts about that specific day or time beat general facts\n"
+    "- For time/schedule questions: facts about that specific day or time "
+    "beat general facts\n"
     "- For 'can/should they do X?' questions: "
     "facts that explain why NOT rank above general context\n"
     "- Consider indirect connections: dairy ingredient → lactose intolerance; "
     "loud noise → migraine trigger; work-from-home day → not in office; "
     "alcohol → medication interaction\n\n"
-    "Output ONLY the node IDs in ranked order, one per line, most relevant first. "
-    "Include all IDs. No explanation."
+    "Output ONLY the node IDs in ranked order, one per line, most relevant "
+    "first. Include all IDs. No explanation."
 )
 
 
