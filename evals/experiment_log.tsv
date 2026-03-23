@@ -1,0 +1,3 @@
+commit	R@1	R@3	R@5	MRR	AR@5	latency	status	description
+07fbf4f	0.70	0.88	0.92	0.794	1.00	0.2s	baseline	baseline — hybrid + cross-encoder (155 cases)
+07fbf4f	0.96	0.99	0.99	0.974	1.00	0.1s	keep	hard-negative reranker training — 1679 samples (237 from eval failures)

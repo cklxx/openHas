@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 
 import torch
-from sentence_transformers import InputExample, CrossEncoder
+from sentence_transformers import CrossEncoder, InputExample
 from sentence_transformers.cross_encoder.evaluation import (
     CERerankingEvaluator,
 )
@@ -29,6 +29,7 @@ _OUT = Path(__file__).parent / "reranker_model"
 
 # Small multilingual reranker — good balance of size and quality
 _DEFAULT_BASE = "BAAI/bge-reranker-v2-m3"
+_POSITIVE_LABEL_THRESHOLD = 0.5
 
 
 def _load_data(path: Path) -> list[dict]:  # type: ignore[type-arg]
@@ -64,7 +65,7 @@ def _build_eval_samples(
         q = r["query"]
         if q not in by_query:
             by_query[q] = {"query": q, "positive": [], "negative": []}
-        if r["label"] > 0.5:
+        if r["label"] > _POSITIVE_LABEL_THRESHOLD:
             by_query[q]["positive"].append(r["passage"])
         else:
             by_query[q]["negative"].append(r["passage"])
@@ -88,6 +89,43 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _train_model(args: argparse.Namespace, rows: list[dict]) -> CrossEncoder:  # type: ignore[type-arg]
+    """Train the cross-encoder and return the model."""
+    train_rows, val_rows = _split_data(rows)
+    print(f"Loaded {len(rows)} rows → {len(train_rows)} train, {len(val_rows)} val")
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    print(f"Device: {device}, Base model: {args.base_model}")
+    model = CrossEncoder(args.base_model, device=device)
+    train_loader = DataLoader(
+        _to_examples(train_rows), batch_size=args.batch_size, shuffle=True,
+    )
+    evaluator = CERerankingEvaluator(
+        samples=_build_eval_samples(val_rows), name="val",
+    )
+    print(f"Training {args.epochs} epochs, lr={args.lr}, batch={args.batch_size}")
+    model.fit(
+        train_dataloader=train_loader, epochs=args.epochs,
+        optimizer_params={"lr": args.lr}, evaluator=evaluator,
+        evaluation_steps=len(train_loader),
+        output_path=args.out, save_best_model=True,
+    )
+    print(f"\nModel saved to {args.out}")
+    return model
+
+
+def _sanity_check(model: CrossEncoder) -> None:
+    pairs = [
+        ("Can the user eat butter?",
+         "User has lactose intolerance, causes digestive discomfort"),
+        ("Can the user eat butter?",
+         "User plays jazz piano as a hobby, practices on weekends"),
+    ]
+    scores = model.predict(pairs)
+    print("\nSanity check:")
+    for (q, p), s in zip(pairs, scores, strict=True):
+        print(f"  {s:.4f}  {q[:40]} ↔ {p[:50]}")
+
+
 def main() -> None:
     args = _parse_args()
     data_path = Path(args.data)
@@ -95,49 +133,8 @@ def main() -> None:
         print(f"Training data not found: {data_path}")
         print("Run: python evals/gen_rerank_data.py first")
         return
-
-    rows = _load_data(data_path)
-    train_rows, val_rows = _split_data(rows)
-    print(f"Loaded {len(rows)} rows → {len(train_rows)} train, {len(val_rows)} val")
-
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
-    print(f"Device: {device}")
-    print(f"Base model: {args.base_model}")
-
-    model = CrossEncoder(args.base_model, device=device)
-
-    train_examples = _to_examples(train_rows)
-    train_loader = DataLoader(train_examples, batch_size=args.batch_size, shuffle=True)
-
-    eval_samples = _build_eval_samples(val_rows)
-    evaluator = CERerankingEvaluator(samples=eval_samples, name="val")
-
-    print(f"\nTraining for {args.epochs} epochs, lr={args.lr}, batch={args.batch_size}")
-    print(f"Train examples: {len(train_examples)}, eval samples: {len(eval_samples)}")
-
-    model.fit(
-        train_dataloader=train_loader,
-        epochs=args.epochs,
-        optimizer_params={"lr": args.lr},
-        evaluator=evaluator,
-        evaluation_steps=len(train_loader),
-        output_path=args.out,
-        save_best_model=True,
-    )
-
-    print(f"\nModel saved to {args.out}")
-
-    # Quick sanity check
-    test_pairs = [
-        ("Can the user eat butter?",
-         "User has lactose intolerance, causes digestive discomfort"),
-        ("Can the user eat butter?",
-         "User plays jazz piano as a hobby, practices on weekends"),
-    ]
-    scores = model.predict(test_pairs)
-    print("\nSanity check:")
-    for (q, p), s in zip(test_pairs, scores):
-        print(f"  {s:.4f}  {q[:40]} ↔ {p[:50]}")
+    model = _train_model(args, _load_data(data_path))
+    _sanity_check(model)
 
 
 if __name__ == "__main__":
