@@ -1,11 +1,12 @@
 """Tests for sqlite_vec_store adapter.
 
-Integration tests (@pytest.mark.integration) require sqlite-vec installed
-and sqlite-vec Python package available.
+Integration tests require sqlite-vec + running llama-server on embed port (18080).
+Skipped automatically when the server is not reachable.
 """
 
 import sys
 
+import httpx
 import pytest
 from src.domain_types.memory import ConsolidationAction, MemoryNode
 
@@ -15,6 +16,20 @@ _MISSING_EXCLUDED = 2
 _EXPANSION_COUNT = 3
 
 _EMBED_URL = "http://localhost:18080"
+
+
+def _server_reachable(url: str) -> bool:
+    try:
+        httpx.get(f"{url}/health", timeout=1.0)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        return False
+    return True
+
+
+_skip_no_embed = pytest.mark.skipif(
+    not _server_reachable(_EMBED_URL),
+    reason="llama-server not running on 18080",
+)
 
 
 def _make_node(id: str, emb: tuple[float, ...] = ()) -> MemoryNode:
@@ -27,7 +42,7 @@ def _make_node(id: str, emb: tuple[float, ...] = ()) -> MemoryNode:
 
 # ── Integration tests (require sqlite-vec) ───────────────────────────────────
 
-@pytest.mark.integration
+@_skip_no_embed
 @pytest.mark.asyncio
 async def test_store_and_recall_roundtrip(tmp_path) -> None:  # type: ignore[no-untyped-def]
     import time
